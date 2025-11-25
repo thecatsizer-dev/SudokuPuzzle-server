@@ -288,6 +288,8 @@ function resetPlayerInactivityTimer(roomId, playerId) {
   console.log(`⏱️ Timer reset pour ${player.playerName}`);
 }
 
+// ========== LIGNE 267 - REMPLACER tryMatchmaking() ==========
+
 function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
   const queue = queues[gameMode][difficulty];
   
@@ -296,24 +298,28 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
   if (queue.length > 0) {
     const opponent = queue.shift();
     
-    // ✅✅✅ VÉRIFIER QUE LES 2 SOCKETS SONT CONNECTÉS (FIX FLY.IO)
-    if (!socket.connected || !io.sockets.sockets.has(opponent.socketId)) {
-      console.log(`⚠️ Socket déconnecté - Match annulé`);
-      
-      if (socket.connected) {
-        queue.unshift({ playerId, playerName, socketId: socket.id, timestamp: Date.now() });
+    // ✅✅✅ FIX: Récupérer les sockets ACTUELS depuis connectedSockets
+    const myCurrentSocketId = connectedSockets[playerId];
+    const opponentCurrentSocketId = connectedSockets[opponent.playerId];
+    
+    // ✅ Vérifier que les 2 joueurs ont des sockets valides
+    if (!myCurrentSocketId || !io.sockets.sockets.has(myCurrentSocketId)) {
+      console.log(`⚠️ ${playerName} - Socket invalide`);
+      if (opponentCurrentSocketId && io.sockets.sockets.has(opponentCurrentSocketId)) {
+        queue.unshift(opponent); // Remettre l'adversaire en queue
       }
-      if (io.sockets.sockets.has(opponent.socketId)) {
-        queue.unshift(opponent);
-      }
-      
+      return false;
+    }
+    
+    if (!opponentCurrentSocketId || !io.sockets.sockets.has(opponentCurrentSocketId)) {
+      console.log(`⚠️ ${opponent.playerName} - Socket invalide`);
+      queue.unshift({ playerId, playerName, socketId: myCurrentSocketId, timestamp: Date.now() });
       return false;
     }
     
     const roomId = generateRoomId();
     const puzzle = generateSudokuPuzzle(difficulty);
     const solution = getSolution();
-    
     const frozenInitialPuzzle = JSON.parse(JSON.stringify(puzzle));
     
     const isTimeAttack = gameMode.startsWith('timeAttack');
@@ -327,7 +333,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
       players: {
         [playerId]: {
           playerId, playerName,
-          socketId: socket.id,
+          socketId: myCurrentSocketId, // ✅ Socket actuel
           grid: JSON.parse(JSON.stringify(puzzle)),
           solution: JSON.parse(JSON.stringify(solution)),
           correctMoves: 0, errors: 0, combo: 0, energy: 0,
@@ -339,7 +345,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
         [opponent.playerId]: {
           playerId: opponent.playerId,
           playerName: opponent.playerName,
-          socketId: opponent.socketId,
+          socketId: opponentCurrentSocketId, // ✅ Socket actuel
           grid: JSON.parse(JSON.stringify(puzzle)),
           solution: JSON.parse(JSON.stringify(solution)),
           correctMoves: 0, errors: 0, combo: 0, energy: 0,
@@ -365,7 +371,6 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
         if (!room || room.status === 'finished') return;
         
         console.log(`⏱️ TIME ATTACK TERMINÉ - ${roomId}`);
-        
         room.status = 'finished';
         
         const players = Object.values(room.players);
@@ -419,8 +424,10 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
     }
     
     console.log(`🎮 Match ${gameMode}/${difficulty}: ${playerName} vs ${opponent.playerName}`);
+    console.log(`   Sockets: ${myCurrentSocketId} vs ${opponentCurrentSocketId}`);
     
-    io.to(socket.id).emit('matchFound', {
+    // ✅ Envoi aux sockets ACTUELS
+    io.to(myCurrentSocketId).emit('matchFound', {
       roomId, 
       opponentName: opponent.playerName, 
       puzzle, 
@@ -429,7 +436,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
       difficulty
     });
     
-    io.to(opponent.socketId).emit('matchFound', {
+    io.to(opponentCurrentSocketId).emit('matchFound', {
       roomId, 
       opponentName: playerName, 
       puzzle, 
@@ -455,17 +462,24 @@ io.on('connection', (socket) => {
     serverReady: isServerReady  // ✅ AJOUTÉ
   });
   
-  socket.on('player_connected', (data) => {
-    const { playerId, playerName } = data;
+socket.on('player_connected', (data) => {
+  const { playerId, playerName } = data;
+  
+  console.log(`📝 Enregistrement: ${playerName} (${playerId})`);
+  
+  connectedSockets[playerId] = socket.id;
+  
+  // ✅✅✅ NETTOYER LES ANCIENS game_over DE PLUS DE 2 MINUTES
+  if (finishedGames[playerId]) {
+    const age = Date.now() - finishedGames[playerId].timestamp;
     
-    console.log(`📝 Enregistrement: ${playerName} (${playerId})`);
-    
-    connectedSockets[playerId] = socket.id;
-    
-    if (finishedGames[playerId]) {
-      const { result, timestamp } = finishedGames[playerId];
+    if (age > 120000) { // 2 minutes
+      console.log(`🧹 Ancien game_over supprimé (${Math.round(age/1000)}s)`);
+      delete finishedGames[playerId];
+    } else {
+      const { result } = finishedGames[playerId];
       
-      console.log(`🎮 PARTIE TERMINÉE DÉTECTÉE pour ${playerName}`);
+      console.log(`🎮 PARTIE TERMINÉE RÉCENTE pour ${playerName}`);
       console.log(`   Résultat: ${result.reason}`);
       console.log(`   Winner: ${result.winnerName} | Loser: ${result.loserName}`);
       
@@ -474,6 +488,7 @@ io.on('connection', (socket) => {
       socket.emit('connection_confirmed', { success: true, playerId });
       return;
     }
+  }
     
     if (disconnectedPlayers[playerId]) {
       const { roomId, timeout } = disconnectedPlayers[playerId];
@@ -528,67 +543,76 @@ io.on('connection', (socket) => {
     socket.emit('connection_confirmed', { success: true, playerId });
   });
   
-  socket.on('joinQueue', (data) => {
-    const { playerId, playerName, gameMode, difficulty = 'medium' } = data;
+// ========== LIGNE 583 - HANDLER joinQueue - AJOUT LOGS ==========
+
+socket.on('joinQueue', (data) => {
+  const { playerId, playerName, gameMode, difficulty = 'medium' } = data;
+  
+  if (!socket.connected) {
+    console.log(`⚠️ Socket ${socket.id} pas connecté - Rejet joinQueue`);
+    socket.emit('error', { message: 'Socket non connecté, réessayez' });
+    return;
+  }
+  
+  if (!connectedSockets[playerId]) {
+    console.log(`⚠️ ${playerName} non enregistré - Attente 2s...`);
     
-    // ✅✅✅ VÉRIFICATIONS FLY.IO
-    if (!socket.connected) {
-      console.log(`⚠️ Socket ${socket.id} pas connecté - Rejet joinQueue`);
-      socket.emit('error', { message: 'Socket non connecté, réessayez' });
-      return;
-    }
-    
-    if (!connectedSockets[playerId]) {
-      console.log(`⚠️ ${playerName} non enregistré - Attente 2s...`);
-      
-      setTimeout(() => {
-        if (connectedSockets[playerId] && socket.connected) {
-          console.log(`✅ ${playerName} enregistré après délai - Retry join`);
-          socket.emit('retry_join', { playerId, playerName, gameMode, difficulty });
-        } else {
-          console.log(`❌ ${playerName} toujours non enregistré après 2s`);
-          socket.emit('error', { message: 'Enregistrement échoué, reconnectez-vous' });
-        }
-      }, 2000);
-      return;
-    }
-    
-    const validDifficulties = ['easy', 'medium', 'hard', 'expert'];
-    const validModes = ['classic', 'powerup', 'timeAttackClassic', 'timeAttackPowerup'];
-    
-    if (!validModes.includes(gameMode)) {
-      console.log(`⚠️ Mode invalide: ${gameMode}`);
-      return;
-    }
-    
-    const safeDifficulty = validDifficulties.includes(difficulty) ? difficulty : 'medium';
-    
-    console.log(`🔍 ${playerName} recherche: ${gameMode}/${safeDifficulty}`);
-    
-    for (const mode in queues) {
-      for (const diff in queues[mode]) {
-        const index = queues[mode][diff].findIndex(p => p.playerId === playerId);
-        if (index !== -1) {
-          console.log(`⚠️ Déjà en queue ${mode}/${diff} - Retrait`);
-          queues[mode][diff].splice(index, 1);
-        }
+    setTimeout(() => {
+      if (connectedSockets[playerId] && socket.connected) {
+        console.log(`✅ ${playerName} enregistré après délai - Retry join`);
+        socket.emit('retry_join', { playerId, playerName, gameMode, difficulty });
+      } else {
+        console.log(`❌ ${playerName} toujours non enregistré après 2s`);
+        socket.emit('error', { message: 'Enregistrement échoué, reconnectez-vous' });
+      }
+    }, 2000);
+    return;
+  }
+  
+  // ✅✅✅ LOG CRITIQUE - Socket actuel vs socket en queue
+  console.log(`🔍 ${playerName} joinQueue:`);
+  console.log(`   Socket actuel: ${socket.id}`);
+  console.log(`   Socket enregistré: ${connectedSockets[playerId]}`);
+  
+  const validDifficulties = ['easy', 'medium', 'hard', 'expert'];
+  const validModes = ['classic', 'powerup', 'timeAttackClassic', 'timeAttackPowerup'];
+  
+  if (!validModes.includes(gameMode)) {
+    console.log(`⚠️ Mode invalide: ${gameMode}`);
+    return;
+  }
+  
+  const safeDifficulty = validDifficulties.includes(difficulty) ? difficulty : 'medium';
+  
+  console.log(`🔍 ${playerName} recherche: ${gameMode}/${safeDifficulty}`);
+  
+  // Nettoyer anciennes queues
+  for (const mode in queues) {
+    for (const diff in queues[mode]) {
+      const index = queues[mode][diff].findIndex(p => p.playerId === playerId);
+      if (index !== -1) {
+        console.log(`⚠️ Déjà en queue ${mode}/${diff} - Retrait`);
+        queues[mode][diff].splice(index, 1);
       }
     }
+  }
+  
+  const matched = tryMatchmaking(socket, playerId, playerName, gameMode, safeDifficulty);
+  
+  if (!matched) {
+    // ✅ Utiliser le socket ACTUEL depuis connectedSockets
+    queues[gameMode][safeDifficulty].push({ 
+      playerId, 
+      playerName, 
+      socketId: connectedSockets[playerId], // ✅ FIX ICI
+      timestamp: Date.now()
+    });
     
-    const matched = tryMatchmaking(socket, playerId, playerName, gameMode, safeDifficulty);
-    
-    if (!matched) {
-      queues[gameMode][safeDifficulty].push({ 
-        playerId, 
-        playerName, 
-        socketId: socket.id,
-        timestamp: Date.now()
-      });
-      
-      socket.emit('waiting');
-      console.log(`⏳ ${playerName} en attente (${gameMode}/${safeDifficulty})`);
-    }
-  });
+    socket.emit('waiting');
+    console.log(`⏳ ${playerName} en attente (${gameMode}/${safeDifficulty})`);
+    console.log(`   Socket en queue: ${connectedSockets[playerId]}`);
+  }
+});
   
   socket.on('leaveQueue', () => {
     for (const mode in queues) {
