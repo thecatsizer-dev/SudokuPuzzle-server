@@ -733,58 +733,53 @@ io.on('connection', (socket) => {
   });
   
   socket.on('trigger_power', (data) => {
-    const { roomId, playerId } = data;
-    
-    const room = rooms[roomId];
-    
-    if (!room || (room.gameMode !== 'powerup' && room.gameMode !== 'timeAttackPowerup')) {
-      console.log(`⚠️ Power-up impossible - Mode: ${room?.gameMode || 'unknown'}`);
-      return;
-    }
-    
-    const player = room.players[playerId];
-    if (!player || player.energy < 1) {
-      console.log(`⚠️ Énergie insuffisante - ${player?.playerName || 'unknown'}: ${player?.energy || 0}`);
-      return;
-    }
-    
-    player.energy--;
-    
-    resetPlayerInactivityTimer(roomId, playerId);
-    
-    const powers = [
-      { type: 'fog', duration: 2000 },
-      { type: 'flash', duration: 1000 },
-      { type: 'stun', duration: 1500 },
-      { type: 'shake', duration: 1500 }
-    ];
-    
-    const randomPower = powers[Math.floor(Math.random() * powers.length)];
-    const targetSelf = Math.random() < 0.40;
-    
-    const opponentSocketId = getOpponentSocketId(roomId, playerId);
-    
-    if (targetSelf) {
-      console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
-      socket.emit('powerup_triggered', {
+  const { roomId, playerId } = data;
+  
+  const room = rooms[roomId];
+  
+  if (!room || (room.gameMode !== 'powerup' && room.gameMode !== 'timeAttackPowerup')) {
+    console.log(`⚠️ Power-up impossible - Mode: ${room?.gameMode || 'unknown'}`);
+    return;
+  }
+  
+  const player = room.players[playerId];
+  if (!player || player.energy < 1) {
+    console.log(`⚠️ Énergie insuffisante - ${player?.playerName || 'unknown'}: ${player?.energy || 0}`);
+    return;
+  }
+  
+  player.energy--;
+  
+  resetPlayerInactivityTimer(roomId, playerId);
+  
+  const powers = [
+    { type: 'fog', duration: 2000 },
+    { type: 'flash', duration: 1000 },
+    { type: 'stun', duration: 1500 },
+    { type: 'shake', duration: 1500 }
+  ];
+  
+  const randomPower = powers[Math.floor(Math.random() * powers.length)];
+  const targetSelf = Math.random() < 0.40;
+  
+  const opponentSocketId = getOpponentSocketId(roomId, playerId);
+  
+  if (targetSelf) {
+    console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
+    socket.emit('powerup_triggered', {
+      type: randomPower.type,
+      duration: randomPower.duration
+    });
+  } else {
+    console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
+    if (opponentSocketId) {
+      io.to(opponentSocketId).emit('powerup_triggered', {
         type: randomPower.type,
         duration: randomPower.duration
       });
-    } else {
-      console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
-      if (opponentSocketId) {
-        io.to(opponentSocketId).emit('powerup_triggered', {
-          type: randomPower.type,
-          duration: randomPower.duration
-        });
-        if (opponentSocketId) {
-        io.to(opponentSocketId).emit('powerup_triggered', {
-          type: randomPower.type,
-          duration: randomPower.duration
-        });
-      }
     }
-  });
+  }
+});
 
   socket.on('heartbeat', (data) => {
     const { roomId, playerId } = data;
