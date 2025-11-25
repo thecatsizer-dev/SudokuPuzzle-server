@@ -1,4 +1,4 @@
-// server.js - BACKEND SOCKET.IO PRODUCTION READY v14 - FIX FLY.IO
+// server.js - BACKEND SOCKET.IO PRODUCTION READY v14 - FIX FLY.IO COMPLET
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -18,10 +18,10 @@ const io = socketIO(server, {
   allowEIO3: true,
   pingTimeout: 60000,
   pingInterval: 25000,
-  connectTimeout: 10000,        // ✅ 45s → 10s (FLY.IO)
-  upgradeTimeout: 10000,        // ✅ 30s → 10s (FLY.IO)
+  connectTimeout: 10000,        // ✅ RÉDUIT 45s → 10s
+  upgradeTimeout: 10000,        // ✅ RÉDUIT 30s → 10s
   serveClient: false,
-  perMessageDeflate: false      // ✅ AJOUTÉ (stabilité)
+  perMessageDeflate: false      // ✅ AJOUTÉ pour stabilité
 });
 
 app.use(cors());
@@ -62,7 +62,7 @@ const connectedSockets = {};
 const disconnectedPlayers = {};
 const finishedGames = {};
 
-// ✅ FLAG SERVEUR PRÊT (FLY.IO)
+// ✅ FLAG SERVEUR PRÊT (FLY.IO COLD START)
 let isServerReady = false;
 
 const INACTIVITY_TIMEOUT = 3 * 60 * 1000;
@@ -84,7 +84,7 @@ setInterval(() => {
   }
 }, 60000);
 
-// ========== HELPER FUNCTIONS (INCHANGÉES) ==========
+// ========== HELPER FUNCTIONS ==========
 
 function generateRoomId() {
   return 'room_' + Math.random().toString(36).substr(2, 9);
@@ -296,13 +296,16 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
   if (queue.length > 0) {
     const opponent = queue.shift();
     
-    // ✅✅✅ VÉRIFIER QUE LES 2 SOCKETS SONT CONNECTÉS
+    // ✅✅✅ VÉRIFIER QUE LES 2 SOCKETS SONT CONNECTÉS (FIX FLY.IO)
     if (!socket.connected || !io.sockets.sockets.has(opponent.socketId)) {
       console.log(`⚠️ Socket déconnecté - Match annulé`);
       
-      // ✅ Remettre en queue si connecté
-      if (socket.connected) queue.unshift({ playerId, playerName, socketId: socket.id, timestamp: Date.now() });
-      if (io.sockets.sockets.has(opponent.socketId)) queue.unshift(opponent);
+      if (socket.connected) {
+        queue.unshift({ playerId, playerName, socketId: socket.id, timestamp: Date.now() });
+      }
+      if (io.sockets.sockets.has(opponent.socketId)) {
+        queue.unshift(opponent);
+      }
       
       return false;
     }
@@ -459,8 +462,6 @@ io.on('connection', (socket) => {
     
     connectedSockets[playerId] = socket.id;
     
-    // ... RESTE DU CODE INCHANGÉ (reconnexion, etc.)
-    
     if (finishedGames[playerId]) {
       const { result, timestamp } = finishedGames[playerId];
       
@@ -564,7 +565,6 @@ io.on('connection', (socket) => {
     
     console.log(`🔍 ${playerName} recherche: ${gameMode}/${safeDifficulty}`);
     
-    // ✅ Retirer de toutes les queues
     for (const mode in queues) {
       for (const diff in queues[mode]) {
         const index = queues[mode][diff].findIndex(p => p.playerId === playerId);
@@ -590,38 +590,508 @@ io.on('connection', (socket) => {
     }
   });
   
-  // ... RESTE DU CODE INCHANGÉ (cell_played, trigger_power, etc.)
+  socket.on('leaveQueue', () => {
+    for (const mode in queues) {
+      for (const difficulty in queues[mode]) {
+        const index = queues[mode][difficulty].findIndex(p => p.socketId === socket.id);
+        if (index !== -1) {
+          const player = queues[mode][difficulty].splice(index, 1)[0];
+          console.log(`🚪 ${player.playerName} quitte queue ${mode}/${difficulty}`);
+        }
+      }
+    }
+  });
   
-  // [COPIER TOUT LE RESTE DE TON CODE ICI]
-  // (leaveQueue, updateProgress, cell_played, trigger_power, heartbeat, 
-  //  gameEnd, playerAbandoned, disconnect)
+  socket.on('updateProgress', (data) => {
+    const { roomId, playerId, progress } = data;
+    
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const player = room.players[playerId];
+    if (!player) return;
+    
+    console.log(`⚠️ updateProgress DEPRECATED - Utilisez cell_played`);
+  });
+  
+  socket.on('cell_played', (data) => {
+    const { roomId, playerId, row, col, value } = data;
+    
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const player = room.players[playerId];
+    if (!player) return;
+    
+    if (value < 1 || value > 9) {
+      console.log(`⚠️ Valeur invalide: ${value}`);
+      return;
+    }
+    
+    const initialGrid = room.initialPuzzle;
+    if (initialGrid[row][col] !== 0) {
+      console.log(`⚠️ Cellule fixe: [${row}][${col}]`);
+      return;
+    }
+    
+    const isCorrect = (value === player.solution[row][col]);
+    
+    player.grid[row][col] = value;
+    
+    if (isCorrect) {
+      player.correctMoves++;
+      player.combo++;
+      
+      if ((room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') && 
+          player.combo > 0 && player.combo % 5 === 0) {
+        player.energy = Math.floor(player.combo / 5);
+        console.log(`⚡ ${player.playerName} ÉNERGIE +1 → Total: ${player.energy}`);
+      }
+    } else {
+      player.errors++;
+      player.combo = 0;
+    }
+    
+    player.progress = calculateProgress(player.grid);
+    
+    console.log(`🎯 ${player.playerName} [${row}][${col}]=${value} → ${isCorrect ? '✅' : '❌'} | ${player.progress}/81`);
+    
+    resetPlayerInactivityTimer(roomId, playerId);
+    
+    const opponentSocketId = getOpponentSocketId(roomId, playerId);
+    if (opponentSocketId) {
+      io.to(opponentSocketId).emit('opponentProgress', {
+        progress: player.progress,
+        correctMoves: player.correctMoves,
+        errors: player.errors,
+        combo: player.combo,
+        speed: Math.round(player.speed * 10) / 10,
+        lastAction: isCorrect ? 'correct' : 'error'
+      });
+    }
+    
+    if (player.progress >= 81) {
+      if (room.isTimeAttack) {
+        console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack) - En attente timer`);
+        
+        player.completedEarly = true;
+        
+        io.to(player.socketId).emit('grid_completed', {
+          completionBonus: 500,
+          waitingForTimer: true
+        });
+        
+        return;
+      }
+      
+      room.status = 'finished';
+      
+      const opponentId = Object.keys(room.players).find(id => id !== playerId);
+      const opponent = room.players[opponentId];
+      
+      const elapsed = (Date.now() - room.startTime) / 1000;
+      const winnerScore = calculateScore(player, elapsed);
+      const loserScore = calculateScore(opponent, elapsed);
+      
+      console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
+      
+      const result = {
+        winnerId: playerId,
+        winnerName: player.playerName,
+        winnerScore,
+        loserId: opponentId,
+        loserName: opponent.playerName,
+        loserScore,
+        reason: 'completed'
+      };
+      
+      const winnerConnected = io.sockets.sockets.has(player.socketId);
+      const loserConnected = io.sockets.sockets.has(opponent.socketId);
+      
+      if (winnerConnected) {
+        io.to(player.socketId).emit('game_over', result);
+        console.log(`✅ game_over envoyé au gagnant`);
+      } else {
+        finishedGames[playerId] = { result, timestamp: Date.now() };
+        console.log(`💾 Résultat sauvegardé pour gagnant (déco)`);
+      }
+      
+      if (loserConnected) {
+        io.to(opponent.socketId).emit('game_over', result);
+        console.log(`✅ game_over envoyé au perdant`);
+      } else {
+        finishedGames[opponentId] = { result, timestamp: Date.now() };
+        console.log(`💾 Résultat sauvegardé pour perdant (déco)`);
+      }
+      
+      Object.values(room.players).forEach(p => {
+        if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+      });
+      
+      setTimeout(() => delete rooms[roomId], 5000);
+    }
+  });
+  
+  socket.on('trigger_power', (data) => {
+    const { roomId, playerId } = data;
+    
+    const room = rooms[roomId];
+    
+    if (!room || (room.gameMode !== 'powerup' && room.gameMode !== 'timeAttackPowerup')) {
+      console.log(`⚠️ Power-up impossible - Mode: ${room?.gameMode || 'unknown'}`);
+      return;
+    }
+    
+    const player = room.players[playerId];
+    if (!player || player.energy < 1) {
+      console.log(`⚠️ Énergie insuffisante - ${player?.playerName || 'unknown'}: ${player?.energy || 0}`);
+      return;
+    }
+    
+    player.energy--;
+    
+    resetPlayerInactivityTimer(roomId, playerId);
+    
+    const powers = [
+      { type: 'fog', duration: 2000 },
+      { type: 'flash', duration: 1000 },
+      { type: 'stun', duration: 1500 },
+      { type: 'shake', duration: 1500 }
+    ];
+    
+    const randomPower = powers[Math.floor(Math.random() * powers.length)];
+    const targetSelf = Math.random() < 0.40;
+    
+    const opponentSocketId = getOpponentSocketId(roomId, playerId);
+    
+    if (targetSelf) {
+      console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
+      socket.emit('powerup_triggered', {
+        type: randomPower.type,
+        duration: randomPower.duration
+      });
+    } else {
+      console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
+      if (opponentSocketId) {
+        io.to(opponentSocketId).emit('powerup_triggered', {
+          type: randomPower.type,
+          duration: randomPower.duration
+        });
+        if (opponentSocketId) {
+        io.to(opponentSocketId).emit('powerup_triggered', {
+          type: randomPower.type,
+          duration: randomPower.duration
+        });
+      }
+    }
+  });
+
+  socket.on('heartbeat', (data) => {
+    const { roomId, playerId } = data;
+    
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const player = room.players[playerId];
+    if (!player) return;
+    
+    resetPlayerInactivityTimer(roomId, playerId);
+  });
+  
+  socket.on('gameEnd', (data) => {
+    const { roomId, playerId, score, timeInSeconds } = data;
+    console.log(`🏁 ${playerId}: ${score}pts en ${timeInSeconds}s`);
+  });
+
+  socket.on('playerAbandoned', (data) => {
+    const { roomId, playerId } = data;
+    
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const abandoned = room.players[playerId];
+    if (!abandoned) return;
+    
+    console.log(`🚪 ${abandoned.playerName} ABANDONNE`);
+    
+    const opponentId = Object.keys(room.players).find(id => id !== playerId);
+    const opponent = room.players[opponentId];
+    
+    if (opponent) {
+      const winnerScore = calculateFinalScore(room, opponent);
+      const loserScore = 0;
+      
+      const result = {
+        winnerId: opponentId,
+        winnerName: opponent.playerName,
+        winnerScore,
+        loserId: playerId,
+        loserName: abandoned.playerName,
+        loserScore,
+        reason: 'opponent_abandoned'
+      };
+      
+      const opponentConnected = io.sockets.sockets.has(opponent.socketId);
+      const abandonedConnected = io.sockets.sockets.has(abandoned.socketId);
+      
+      if (opponentConnected) {
+        io.to(opponent.socketId).emit('game_over', result);
+        console.log(`✅ game_over abandon envoyé au gagnant`);
+      } else {
+        finishedGames[opponentId] = { result, timestamp: Date.now() };
+        console.log(`💾 Résultat abandon sauvegardé pour gagnant (déco)`);
+      }
+      
+      if (abandonedConnected) {
+        io.to(abandoned.socketId).emit('game_over', result);
+        console.log(`✅ game_over abandon envoyé au perdant`);
+      } else {
+        finishedGames[playerId] = { result, timestamp: Date.now() };
+        console.log(`💾 Résultat abandon sauvegardé pour perdant (déco)`);
+      }
+      
+      console.log(`   Winner: ${winnerScore} pts | Loser: ${loserScore} pts`);
+    }
+    
+    Object.values(room.players).forEach(p => {
+      if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+    });
+    
+    if (disconnectedPlayers[playerId]) {
+      clearTimeout(disconnectedPlayers[playerId].timeout);
+      delete disconnectedPlayers[playerId];
+    }
+    
+    delete rooms[roomId];
+  });
+
+  socket.on('disconnect', () => {
+    console.log('🔌 Déconnexion:', socket.id);
+    
+    for (const mode in queues) {
+      for (const difficulty in queues[mode]) {
+        const index = queues[mode][difficulty].findIndex(p => p.socketId === socket.id);
+        if (index !== -1) {
+          const player = queues[mode][difficulty].splice(index, 1)[0];
+          console.log(`🚪 ${player.playerName} retiré (déco)`);
+        }
+      }
+    }
+    
+    for (const roomId in rooms) {
+      const room = rooms[roomId];
+      const disconnected = Object.values(room.players).find(p => p.socketId === socket.id);
+      
+      if (disconnected) {
+        console.log(`⚠️ ${disconnected.playerName} déco - ATTENTE 60s`);
+        
+        disconnectedPlayers[disconnected.playerId] = {
+          roomId,
+          timestamp: Date.now(),
+          timeout: setTimeout(() => {
+            console.log(`⏰ ${disconnected.playerName} absent après 60s`);
+            
+            const opponentId = Object.keys(room.players).find(id => id !== disconnected.playerId);
+            const opponent = room.players[opponentId];
+            
+            if (opponent) {
+              const winnerScore = calculateFinalScore(room, opponent);
+              const loserScore = 0;
+              
+              const result = {
+                winnerId: opponentId,
+                winnerName: opponent.playerName,
+                winnerScore,
+                loserId: disconnected.playerId,
+                loserName: disconnected.playerName,
+                loserScore,
+                reason: 'opponent_abandoned'
+              };
+              
+              const opponentConnected = io.sockets.sockets.has(opponent.socketId);
+              
+              if (opponentConnected) {
+                io.to(opponent.socketId).emit('game_over', result);
+                console.log(`✅ game_over timeout envoyé à ${opponent.playerName}`);
+              } else {
+                finishedGames[opponentId] = { result, timestamp: Date.now() };
+                console.log(`💾 Résultat timeout sauvegardé pour adversaire (déco)`);
+              }
+              
+              finishedGames[disconnected.playerId] = { result, timestamp: Date.now() };
+              console.log(`💾 Résultat timeout sauvegardé pour ${disconnected.playerName}`);
+              console.log(`   Winner: ${winnerScore} pts | Loser: ${loserScore} pts`);
+            }
+            
+            Object.values(room.players).forEach(p => {
+              if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+            });
+            
+            delete rooms[roomId];
+            delete disconnectedPlayers[disconnected.playerId];
+          }, RECONNECT_TIMEOUT)
+        };
+        
+        const opponentId = Object.keys(room.players).find(id => id !== disconnected.playerId);
+        const opponentSocketId = room.players[opponentId]?.socketId;
+        
+        if (opponentSocketId) {
+          io.to(opponentSocketId).emit('opponent_disconnected_temp', {
+            playerName: disconnected.playerName,
+            waitTime: 60
+          });
+        }
+        
+        break;
+      }
+    }
+    
+    for (const playerId in connectedSockets) {
+      if (connectedSockets[playerId] === socket.id) {
+        delete connectedSockets[playerId];
+        break;
+      }
+    }
+  });
 });
 
-// ========== ROUTES API (INCHANGÉES) ==========
+// ========== ROUTES API ==========
 
 app.get('/', (req, res) => {
   res.json({
     status: 'alive',
-    message: 'Sudoku Server v14 - FIX FLY.IO',
+    message: 'Sudoku Server v14 - FIX FLY.IO COMPLET',
     uptime: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
     serverReady: isServerReady
   });
 });
 
-// [COPIER /health et /stats INCHANGÉS]
+app.get('/health', (req, res) => {
+  const memUsage = process.memoryUsage();
+  
+  let totalWaiting = 0;
+  for (const mode in queues) {
+    for (const difficulty in queues[mode]) {
+      totalWaiting += queues[mode][difficulty].length;
+    }
+  }
+  
+  res.json({
+    status: 'ok',
+    uptime: Math.round(process.uptime()),
+    rooms: Object.keys(rooms).length,
+    queues: {
+      classic: {
+        easy: queues.classic.easy.length,
+        medium: queues.classic.medium.length,
+        hard: queues.classic.hard.length,
+        expert: queues.classic.expert.length
+      },
+      powerup: {
+        easy: queues.powerup.easy.length,
+        medium: queues.powerup.medium.length,
+        hard: queues.powerup.hard.length,
+        expert: queues.powerup.expert.length
+      },
+      timeAttackClassic: {
+        easy: queues.timeAttackClassic.easy.length,
+        medium: queues.timeAttackClassic.medium.length,
+        hard: queues.timeAttackClassic.hard.length,
+        expert: queues.timeAttackClassic.expert.length
+      },
+      timeAttackPowerup: {
+        easy: queues.timeAttackPowerup.easy.length,
+        medium: queues.timeAttackPowerup.medium.length,
+        hard: queues.timeAttackPowerup.hard.length,
+        expert: queues.timeAttackPowerup.expert.length
+      },
+      total: totalWaiting
+    },
+    connectedPlayers: Object.keys(connectedSockets).length,
+    disconnectedPlayers: Object.keys(disconnectedPlayers).length,
+    finishedGames: Object.keys(finishedGames).length,
+    memory: {
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB'
+    },
+    serverReady: isServerReady
+  });
+});
 
-// ========== START SERVER ==========
+app.get('/stats', (req, res) => {
+  res.json({
+    rooms: Object.keys(rooms).map(id => ({
+      roomId: id,
+      gameMode: rooms[id].gameMode,
+      difficulty: rooms[id].difficulty,
+      status: rooms[id].status,
+      players: Object.keys(rooms[id].players).map(pid => ({
+        name: rooms[id].players[pid].playerName,
+        progress: rooms[id].players[pid].progress,
+        combo: rooms[id].players[pid].combo,
+        energy: rooms[id].players[pid].energy
+      }))
+    })),
+    queues: {
+      classic: {
+        easy: queues.classic.easy.map(p => ({ name: p.playerName })),
+        medium: queues.classic.medium.map(p => ({ name: p.playerName })),
+        hard: queues.classic.hard.map(p => ({ name: p.playerName })),
+        expert: queues.classic.expert.map(p => ({ name: p.playerName }))
+      },
+      powerup: {
+        easy: queues.powerup.easy.map(p => ({ name: p.playerName })),
+        medium: queues.powerup.medium.map(p => ({ name: p.playerName })),
+        hard: queues.powerup.hard.map(p => ({ name: p.playerName })),
+        expert: queues.powerup.expert.map(p => ({ name: p.playerName }))
+      },
+      timeAttackClassic: {
+        easy: queues.timeAttackClassic.easy.map(p => ({ name: p.playerName })),
+        medium: queues.timeAttackClassic.medium.map(p => ({ name: p.playerName })),
+        hard: queues.timeAttackClassic.hard.map(p => ({ name: p.playerName })),
+        expert: queues.timeAttackClassic.expert.map(p => ({ name: p.playerName }))
+      },
+      timeAttackPowerup: {
+        easy: queues.timeAttackPowerup.easy.map(p => ({ name: p.playerName })),
+        medium: queues.timeAttackPowerup.medium.map(p => ({ name: p.playerName })),
+        hard: queues.timeAttackPowerup.hard.map(p => ({ name: p.playerName })),
+        expert: queues.timeAttackPowerup.expert.map(p => ({ name: p.playerName }))
+      }
+    },
+    disconnectedPlayers: Object.keys(disconnectedPlayers).length,
+    finishedGames: Object.keys(finishedGames).length
+  });
+});
+
+setInterval(() => {
+  let totalWaiting = 0;
+  for (const mode in queues) {
+    for (const difficulty in queues[mode]) {
+      totalWaiting += queues[mode][difficulty].length;
+    }
+  }
+  
+  console.log('📊 ========== STATS ==========');
+  console.log(`   Rooms: ${Object.keys(rooms).length}`);
+  console.log(`   Players Waiting: ${totalWaiting}`);
+  console.log(`   Connected: ${Object.keys(connectedSockets).length}`);
+  console.log(`   Disconnected: ${Object.keys(disconnectedPlayers).length}`);
+  console.log(`   Finished Games Cache: ${Object.keys(finishedGames).length}`);
+  console.log('==============================');
+}, 300000);
 
 const PORT = process.env.PORT || 3000;
+
+// ✅✅✅ DÉMARRAGE SERVEUR AVEC WARM-UP FLY.IO
 server.listen(PORT, () => {
-  console.log(`🚀 Serveur v14 - FIX FLY.IO sur port ${PORT}`);
+  console.log(`🚀 Serveur v14 - FIX FLY.IO COMPLET sur port ${PORT}`);
   console.log(`🌐 Health: http://localhost:${PORT}/health`);
   console.log(`📊 Stats: http://localhost:${PORT}/stats`);
   
-  // ✅✅✅ MARQUER SERVEUR PRÊT APRÈS 3s
+  // ✅ WARM-UP 3s avant d'accepter les matchs (Fly.io cold start)
   setTimeout(() => {
     isServerReady = true;
-    console.log('✅ Serveur prêt à accepter connexions');
+    console.log('✅✅✅ SERVEUR PRÊT - Acceptation des matchs activée');
   }, 3000);
 });
