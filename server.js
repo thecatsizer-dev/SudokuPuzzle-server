@@ -298,15 +298,13 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
   if (queue.length > 0) {
     const opponent = queue.shift();
     
-    // ✅✅✅ FIX: Récupérer les sockets ACTUELS depuis connectedSockets
     const myCurrentSocketId = connectedSockets[playerId];
     const opponentCurrentSocketId = connectedSockets[opponent.playerId];
     
-    // ✅ Vérifier que les 2 joueurs ont des sockets valides
     if (!myCurrentSocketId || !io.sockets.sockets.has(myCurrentSocketId)) {
       console.log(`⚠️ ${playerName} - Socket invalide`);
       if (opponentCurrentSocketId && io.sockets.sockets.has(opponentCurrentSocketId)) {
-        queue.unshift(opponent); // Remettre l'adversaire en queue
+        queue.unshift(opponent);
       }
       return false;
     }
@@ -333,100 +331,60 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
       players: {
         [playerId]: {
           playerId, playerName,
-          socketId: myCurrentSocketId, // ✅ Socket actuel
+          socketId: myCurrentSocketId,
           grid: JSON.parse(JSON.stringify(puzzle)),
           solution: JSON.parse(JSON.stringify(solution)),
           correctMoves: 0, errors: 0, combo: 0, energy: 0,
           progress: calculateProgress(puzzle), speed: 0, 
           lastMoveTime: Date.now(),
           inactivityTimer: null,
-          completedEarly: false
+          completedEarly: false,
+          // ✅✅✅ TIMER INDIVIDUEL
+          personalEndTime: isTimeAttack ? (Date.now() + timeLimit) : null,
+          hasFinished: false,
+          finalScore: 0
         },
         [opponent.playerId]: {
           playerId: opponent.playerId,
           playerName: opponent.playerName,
-          socketId: opponentCurrentSocketId, // ✅ Socket actuel
+          socketId: opponentCurrentSocketId,
           grid: JSON.parse(JSON.stringify(puzzle)),
           solution: JSON.parse(JSON.stringify(solution)),
           correctMoves: 0, errors: 0, combo: 0, energy: 0,
           progress: calculateProgress(puzzle), speed: 0, 
           lastMoveTime: Date.now(),
           inactivityTimer: null,
-          completedEarly: false
+          completedEarly: false,
+          // ✅✅✅ TIMER INDIVIDUEL
+          personalEndTime: isTimeAttack ? (Date.now() + timeLimit) : null,
+          hasFinished: false,
+          finalScore: 0
         }
       },
       status: 'playing',
       startTime: Date.now(),
       isTimeAttack,
-      timeLimit,
-      endTime: isTimeAttack ? (Date.now() + timeLimit) : null
+      timeLimit
     };
     
     setupPlayerInactivityTimer(roomId, playerId);
     setupPlayerInactivityTimer(roomId, opponent.playerId);
     
+    // ✅✅✅ TIMER INDIVIDUEL PAR JOUEUR
     if (isTimeAttack) {
+      // Timer pour joueur 1
       setTimeout(() => {
-        const room = rooms[roomId];
-        if (!room || room.status === 'finished') return;
-        
-        console.log(`⏱️ TIME ATTACK TERMINÉ - ${roomId}`);
-        room.status = 'finished';
-        
-        const players = Object.values(room.players);
-        const [p1, p2] = players;
-        
-        const score1 = calculateTimeAttackScore(p1);
-        const score2 = calculateTimeAttackScore(p2);
-        
-        const winner = score1 > score2 ? p1 : p2;
-        const loser = score1 > score2 ? p2 : p1;
-        const winnerScore = Math.max(score1, score2);
-        const loserScore = Math.min(score1, score2);
-        
-        console.log(`🏆 TIME ATTACK: ${winner.playerName} (${winnerScore}) vs ${loser.playerName} (${loserScore})`);
-        
-        const result = {
-          winnerId: winner.playerId,
-          winnerName: winner.playerName,
-          winnerScore,
-          loserId: loser.playerId,
-          loserName: loser.playerName,
-          loserScore,
-          reason: 'time_up'
-        };
-        
-        const winnerConnected = io.sockets.sockets.has(winner.socketId);
-        const loserConnected = io.sockets.sockets.has(loser.socketId);
-        
-        if (winnerConnected) {
-          io.to(winner.socketId).emit('game_over', result);
-          console.log(`✅ game_over time_up envoyé au gagnant`);
-        } else {
-          finishedGames[winner.playerId] = { result, timestamp: Date.now() };
-          console.log(`💾 Résultat time_up sauvegardé pour gagnant (déco)`);
-        }
-        
-        if (loserConnected) {
-          io.to(loser.socketId).emit('game_over', result);
-          console.log(`✅ game_over time_up envoyé au perdant`);
-        } else {
-          finishedGames[loser.playerId] = { result, timestamp: Date.now() };
-          console.log(`💾 Résultat time_up sauvegardé pour perdant (déco)`);
-        }
-        
-        Object.values(room.players).forEach(p => {
-          if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
-        });
-        
-        delete rooms[roomId];
+        handlePlayerTimeExpired(roomId, playerId);
+      }, timeLimit);
+      
+      // Timer pour joueur 2
+      setTimeout(() => {
+        handlePlayerTimeExpired(roomId, opponent.playerId);
       }, timeLimit);
     }
     
     console.log(`🎮 Match ${gameMode}/${difficulty}: ${playerName} vs ${opponent.playerName}`);
-    console.log(`   Sockets: ${myCurrentSocketId} vs ${opponentCurrentSocketId}`);
     
-    // ✅ Envoi aux sockets ACTUELS
     io.to(myCurrentSocketId).emit('matchFound', {
       roomId, 
       opponentName: opponent.playerName, 
@@ -449,6 +407,111 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
   }
   
   return false;
+}
+// ========== NOUVELLE FONCTION - GESTION EXPIRATION TIMER ==========
+
+function handlePlayerTimeExpired(roomId, playerId) {
+  const room = rooms[roomId];
+  
+  if (!room || room.status === 'finished') {
+    console.log(`⏰ Timer expiré mais room ${roomId} déjà terminée`);
+    return;
+  }
+  
+  const player = room.players[playerId];
+  if (!player) return;
+  
+  console.log(`⏰ TIMER EXPIRÉ - ${player.playerName}`);
+  
+  // ✅ Marquer ce joueur comme "fini"
+  player.hasFinished = true;
+  player.finalScore = calculateTimeAttackScore(player);
+  
+  console.log(`   Score final: ${player.finalScore} pts`);
+  
+  // ✅ Notifier le joueur
+  const playerConnected = io.sockets.sockets.has(player.socketId);
+  if (playerConnected) {
+    io.to(player.socketId).emit('time_expired', {
+      yourScore: player.finalScore,
+      waitingForOpponent: true
+    });
+    console.log(`📤 time_expired envoyé à ${player.playerName}`);
+  }
+  
+  // ✅ Vérifier si L'AUTRE a aussi fini
+  const opponentId = Object.keys(room.players).find(id => id !== playerId);
+  const opponent = room.players[opponentId];
+  
+  if (opponent && opponent.hasFinished) {
+    // ✅ LES 2 ONT FINI → GAME OVER
+    console.log(`🏁 LES 2 JOUEURS ONT FINI - Calcul final`);
+    endTimeAttackGame(roomId);
+  } else {
+    console.log(`⏳ ${opponent?.playerName || 'Adversaire'} continue à jouer...`);
+  }
+}
+
+// ========== NOUVELLE FONCTION - FIN DE PARTIE TIME ATTACK ==========
+
+function endTimeAttackGame(roomId) {
+  const room = rooms[roomId];
+  if (!room || room.status === 'finished') return;
+  
+  room.status = 'finished';
+  
+  const players = Object.values(room.players);
+  const [p1, p2] = players;
+  
+  const score1 = p1.finalScore;
+  const score2 = p2.finalScore;
+  
+  const winner = score1 > score2 ? p1 : p2;
+  const loser = score1 > score2 ? p2 : p1;
+  const winnerScore = Math.max(score1, score2);
+  const loserScore = Math.min(score1, score2);
+  
+  console.log(`🏆 TIME ATTACK TERMINÉ:`);
+  console.log(`   ${winner.playerName}: ${winnerScore} pts`);
+  console.log(`   ${loser.playerName}: ${loserScore} pts`);
+  
+  const result = {
+    winnerId: winner.playerId,
+    winnerName: winner.playerName,
+    winnerScore,
+    loserId: loser.playerId,
+    loserName: loser.playerName,
+    loserScore,
+    reason: 'time_attack_finished'
+  };
+  
+  // ✅ Envoyer game_over aux 2 joueurs
+  const winnerConnected = io.sockets.sockets.has(winner.socketId);
+  const loserConnected = io.sockets.sockets.has(loser.socketId);
+  
+  if (winnerConnected) {
+    io.to(winner.socketId).emit('game_over', result);
+    console.log(`✅ game_over envoyé au gagnant`);
+  } else {
+    finishedGames[winner.playerId] = { result, timestamp: Date.now() };
+    console.log(`💾 Résultat sauvegardé pour gagnant (déco)`);
+  }
+  
+  if (loserConnected) {
+    io.to(loser.socketId).emit('game_over', result);
+    console.log(`✅ game_over envoyé au perdant`);
+  } else {
+    finishedGames[loser.playerId] = { result, timestamp: Date.now() };
+    console.log(`💾 Résultat sauvegardé pour perdant (déco)`);
+  }
+  
+  // ✅ Cleanup timers
+  Object.values(room.players).forEach(p => {
+    if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+  });
+  
+  delete rooms[roomId];
+  console.log(`🧹 Room ${roomId} supprimée`);
 }
 
 // ========== SOCKET.IO EVENTS ==========
@@ -639,143 +702,161 @@ socket.on('joinQueue', (data) => {
   });
   
   socket.on('cell_played', (data) => {
-    const { roomId, playerId, row, col, value } = data;
-    
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    const player = room.players[playerId];
-    if (!player) return;
-    
-    if (value < 1 || value > 9) {
-      console.log(`⚠️ Valeur invalide: ${value}`);
-      return;
-    }
-    
-    const initialGrid = room.initialPuzzle;
-    if (initialGrid[row][col] !== 0) {
-      console.log(`⚠️ Cellule fixe: [${row}][${col}]`);
-      return;
-    }
-    
-    const isCorrect = (value === player.solution[row][col]);
-    
-    player.grid[row][col] = value;
-    
-    if (isCorrect) {
-      player.correctMoves++;
-      player.combo++;
-      
-      if ((room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') && 
-          player.combo > 0 && player.combo % 5 === 0) {
-        player.energy = Math.floor(player.combo / 5);
-        console.log(`⚡ ${player.playerName} ÉNERGIE +1 → Total: ${player.energy}`);
-      }
-    } else {
-      player.errors++;
-      player.combo = 0;
-    }
-    
-    player.progress = calculateProgress(player.grid);
-    
-    console.log(`🎯 ${player.playerName} [${row}][${col}]=${value} → ${isCorrect ? '✅' : '❌'} | ${player.progress}/81`);
-    
-    resetPlayerInactivityTimer(roomId, playerId);
-    
-    const opponentSocketId = getOpponentSocketId(roomId, playerId);
-    if (opponentSocketId) {
-      io.to(opponentSocketId).emit('opponentProgress', {
-        progress: player.progress,
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        speed: Math.round(player.speed * 10) / 10,
-        lastAction: isCorrect ? 'correct' : 'error'
-      });
-    }
-    
-    // ✅ VÉRIFIER SI GRILLE RÉELLEMENT TERMINÉE
-if (player.progress >= 81) {
-  // ✅ Vérifier que TOUTES les cellules sont correctes
-  let isActuallyComplete = true;
-  for (let r = 0; r < 9; r++) {
-    for (let c = 0; c < 9; c++) {
-      if (player.grid[r][c] !== player.solution[r][c]) {
-        isActuallyComplete = false;
-        break;
-      }
-    }
-    if (!isActuallyComplete) break;
-  }
-
-  if (!isActuallyComplete) {
-    console.log(`⚠️ ${player.playerName} progress 81/81 mais grille incorrecte`);
+  const { roomId, playerId, row, col, value } = data;
+  
+  const room = rooms[roomId];
+  if (!room) return;
+  
+  const player = room.players[playerId];
+  if (!player) return;
+  
+  // ✅✅✅ BLOQUER SI JOUEUR A FINI (timer expiré)
+  if (player.hasFinished) {
+    console.log(`⚠️ ${player.playerName} a fini - Action bloquée`);
     return;
   }
+  
+  if (value < 1 || value > 9) {
+    console.log(`⚠️ Valeur invalide: ${value}`);
+    return;
+  }
+  
+  const initialGrid = room.initialPuzzle;
+  if (initialGrid[row][col] !== 0) {
+    console.log(`⚠️ Cellule fixe: [${row}][${col}]`);
+    return;
+  }
+  
+  const isCorrect = (value === player.solution[row][col]);
+  
+  player.grid[row][col] = value;
+  
+  if (isCorrect) {
+    player.correctMoves++;
+    player.combo++;
+    
+    if ((room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') && 
+        player.combo > 0 && player.combo % 5 === 0) {
+      player.energy = Math.floor(player.combo / 5);
+      console.log(`⚡ ${player.playerName} ÉNERGIE +1 → Total: ${player.energy}`);
+    }
+  } else {
+    player.errors++;
+    player.combo = 0;
+  }
+  
+  player.progress = calculateProgress(player.grid);
+  
+  console.log(`🎯 ${player.playerName} [${row}][${col}]=${value} → ${isCorrect ? '✅' : '❌'} | ${player.progress}/81`);
+  
+  resetPlayerInactivityTimer(roomId, playerId);
+  
+  const opponentSocketId = getOpponentSocketId(roomId, playerId);
+  if (opponentSocketId) {
+    io.to(opponentSocketId).emit('opponentProgress', {
+      progress: player.progress,
+      correctMoves: player.correctMoves,
+      errors: player.errors,
+      combo: player.combo,
+      speed: Math.round(player.speed * 10) / 10,
+      lastAction: isCorrect ? 'correct' : 'error'
+    });
+  }
+  
+  // ✅ VÉRIFIER SI GRILLE TERMINÉE
+  if (player.progress >= 81) {
+    let isActuallyComplete = true;
+    for (let r = 0; r < 9; r++) {
+      for (let c = 0; c < 9; c++) {
+        if (player.grid[r][c] !== player.solution[r][c]) {
+          isActuallyComplete = false;
+          break;
+        }
+      }
+      if (!isActuallyComplete) break;
+    }
 
-  if (room.isTimeAttack) {
-    console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack) - En attente timer`);
+    if (!isActuallyComplete) {
+      console.log(`⚠️ ${player.playerName} progress 81/81 mais grille incorrecte`);
+      return;
+    }
+
+    if (room.isTimeAttack) {
+      console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack)`);
+      
+      player.completedEarly = true;
+      player.hasFinished = true;
+      player.finalScore = calculateTimeAttackScore(player);
+      
+      io.to(player.socketId).emit('grid_completed', {
+        completionBonus: 500,
+        waitingForTimer: true
+      });
+      
+      // ✅ Vérifier si l'adversaire a aussi fini
+      const opponentId = Object.keys(room.players).find(id => id !== playerId);
+      const opponent = room.players[opponentId];
+      
+      if (opponent && opponent.hasFinished) {
+        console.log(`🏁 LES 2 JOUEURS ONT FINI - Calcul final`);
+        endTimeAttackGame(roomId);
+      } else {
+        console.log(`⏳ En attente de ${opponent?.playerName || 'adversaire'}...`);
+      }
+      
+      return;
+    }
     
-    player.completedEarly = true;
+    // ✅ MODE CLASSIQUE - VICTOIRE IMMÉDIATE (inchangé)
+    room.status = 'finished';
     
-    io.to(player.socketId).emit('grid_completed', {
-      completionBonus: 500,
-      waitingForTimer: true
+    const opponentId = Object.keys(room.players).find(id => id !== playerId);
+    const opponent = room.players[opponentId];
+    
+    const elapsed = (Date.now() - room.startTime) / 1000;
+    const winnerScore = calculateScore(player, elapsed);
+    const loserScore = calculateScore(opponent, elapsed);
+    
+    console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
+    
+    const result = {
+      winnerId: playerId,
+      winnerName: player.playerName,
+      winnerScore,
+      loserId: opponentId,
+      loserName: opponent.playerName,
+      loserScore,
+      reason: 'completed'
+    };
+    
+    const winnerConnected = io.sockets.sockets.has(player.socketId);
+    const loserConnected = io.sockets.sockets.has(opponent.socketId);
+    
+    if (winnerConnected) {
+      io.to(player.socketId).emit('game_over', result);
+      console.log(`✅ game_over envoyé au gagnant`);
+    } else {
+      finishedGames[playerId] = { result, timestamp: Date.now() };
+      console.log(`💾 Résultat sauvegardé pour gagnant (déco)`);
+    }
+    
+    if (loserConnected) {
+      io.to(opponent.socketId).emit('game_over', result);
+      console.log(`✅ game_over envoyé au perdant`);
+    } else {
+      finishedGames[opponentId] = { result, timestamp: Date.now() };
+      console.log(`💾 Résultat sauvegardé pour perdant (déco)`);
+    }
+    
+    Object.values(room.players).forEach(p => {
+      if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
     });
     
-    return;
+    setTimeout(() => delete rooms[roomId], 5000);
   }
+});
   
-  // ✅ MODE CLASSIQUE - VICTOIRE IMMÉDIATE
-  room.status = 'finished';
-  
-  const opponentId = Object.keys(room.players).find(id => id !== playerId);
-  const opponent = room.players[opponentId];
-  
-  const elapsed = (Date.now() - room.startTime) / 1000;
-  const winnerScore = calculateScore(player, elapsed);
-  const loserScore = calculateScore(opponent, elapsed);
-  
-  console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
-  
-  const result = {
-    winnerId: playerId,
-    winnerName: player.playerName,
-    winnerScore,
-    loserId: opponentId,
-    loserName: opponent.playerName,
-    loserScore,
-    reason: 'completed'
-  };
-  
-  const winnerConnected = io.sockets.sockets.has(player.socketId);
-  const loserConnected = io.sockets.sockets.has(opponent.socketId);
-  
-  if (winnerConnected) {
-    io.to(player.socketId).emit('game_over', result);
-    console.log(`✅ game_over envoyé au gagnant`);
-  } else {
-    finishedGames[playerId] = { result, timestamp: Date.now() };
-    console.log(`💾 Résultat sauvegardé pour gagnant (déco)`);
-  }
-  
-  if (loserConnected) {
-    io.to(opponent.socketId).emit('game_over', result);
-    console.log(`✅ game_over envoyé au perdant`);
-  } else {
-    finishedGames[opponentId] = { result, timestamp: Date.now() };
-    console.log(`💾 Résultat sauvegardé pour perdant (déco)`);
-  }
-  
-  Object.values(room.players).forEach(p => {
-    if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
-  });
-  
-  setTimeout(() => delete rooms[roomId], 5000);
-}
-  });
-  
-  socket.on('trigger_power', (data) => {
+ socket.on('trigger_power', (data) => {
   const { roomId, playerId } = data;
   
   const room = rooms[roomId];
@@ -795,61 +876,69 @@ if (player.progress >= 81) {
   
   resetPlayerInactivityTimer(roomId, playerId);
   
- const isTimeAttack = room.gameMode.startsWith('timeAttack');
+  const isTimeAttack = room.gameMode.startsWith('timeAttack');
 
-let powers = [
-  { type: 'fog', duration: 10000 },      // ✅ 10s
-  { type: 'stun', duration: 5000 },      // ✅ 5s
-  { type: 'flash', duration: 3000 },     // ✅ 3s
-  { type: 'shake', duration: 15000 },    // ✅ 15s
-  { type: 'cell_eraser', duration: 1000 } // ✅ Tous modes powerup
-];
+  let powers = [
+    { type: 'fog', duration: 10000 },
+    { type: 'stun', duration: 5000 },
+    { type: 'flash', duration: 3000 },
+    { type: 'shake', duration: 15000 },
+    { type: 'cell_eraser', duration: 1000 }
+  ];
 
-// ✅ TIME DRAIN uniquement en Time Attack
-if (isTimeAttack) {
-  powers.push({ type: 'time_drain', duration: 1500 });
-}
-  
- const randomPower = powers[Math.floor(Math.random() * powers.length)];
-const opponentSocketId = getOpponentSocketId(roomId, playerId);
-
-// ⏱️ TIME DRAIN - Voler 15 secondes (Time Attack uniquement)
-if (randomPower.type === 'time_drain' && room.isTimeAttack) {
-  const stolenSeconds = 15000; // 15s en ms
-  
-  // ✅ Réduire le temps restant de la room
-  const oldEndTime = room.endTime;
-  room.endTime = Math.max(Date.now(), room.endTime - stolenSeconds);
-  
-  const actualStolen = oldEndTime - room.endTime;
-  
-  console.log(`⏱️ ${player.playerName} VOLE ${actualStolen / 1000}s`);
-  console.log(`   Ancien timer: ${new Date(oldEndTime).toISOString()}`);
-  console.log(`   Nouveau timer: ${new Date(room.endTime).toISOString()}`);
-  
-  const opponentSocketId = getOpponentSocketId(roomId, playerId);
-  
-  // 📤 Notifier les 2 joueurs
-  if (opponentSocketId) {
-    io.to(opponentSocketId).emit('powerup_triggered', {
-      type: 'time_drain',
-      duration: randomPower.duration
-    });
-    
-    io.to(opponentSocketId).emit('time_drained', {
-      newEndTime: room.endTime,
-      stolenMs: actualStolen
-    });
+  if (isTimeAttack) {
+    powers.push({ type: 'time_drain', duration: 1500 });
   }
   
-  // 📤 Notifier l'attaquant aussi
-  io.to(player.socketId).emit('time_drained', {
-    newEndTime: room.endTime,
-    stolenMs: actualStolen
-  });
-  
-  return; // ✅ Fin du handler
-}
+  const randomPower = powers[Math.floor(Math.random() * powers.length)];
+  const opponentSocketId = getOpponentSocketId(roomId, playerId);
+
+  // ⏱️ TIME DRAIN - Voler 15 secondes
+  if (randomPower.type === 'time_drain' && room.isTimeAttack) {
+    const stolenMs = 15000; // 15s
+    
+    const opponentId = Object.keys(room.players).find(id => id !== playerId);
+    const opponent = room.players[opponentId];
+    
+    if (!opponent) return;
+    
+    // ✅✅✅ MODIFIER LES TIMERS INDIVIDUELS
+    const now = Date.now();
+    
+    // Adversaire perd 15s
+    if (opponent.personalEndTime) {
+      opponent.personalEndTime = Math.max(now, opponent.personalEndTime - stolenMs);
+      console.log(`⏱️ ${opponent.playerName} PERD 15s`);
+    }
+    
+    // Attaquant gagne 15s
+    if (player.personalEndTime) {
+      player.personalEndTime = player.personalEndTime + stolenMs;
+      console.log(`⏱️ ${player.playerName} GAGNE 15s`);
+    }
+    
+    // 📤 Notifier les 2 joueurs
+    if (opponentSocketId) {
+      io.to(opponentSocketId).emit('powerup_triggered', {
+        type: 'time_drain',
+        duration: randomPower.duration
+      });
+      
+      io.to(opponentSocketId).emit('time_drained', {
+        newEndTime: opponent.personalEndTime,
+        stolenMs: stolenMs,
+        drainingPlayerId: playerId
+      });
+    }
+    
+    io.to(player.socketId).emit('time_drained', {
+      newEndTime: player.personalEndTime,
+      stolenMs: stolenMs,
+      drainingPlayerId: playerId
+    });
+    
+    return;
+  }
 
 // 🗑️ CELL ERASER - Effacer 1-2 cellules
 if (randomPower.type === 'cell_eraser') {
