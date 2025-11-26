@@ -776,33 +776,125 @@ socket.on('joinQueue', (data) => {
   
   resetPlayerInactivityTimer(roomId, playerId);
   
-  const powers = [
-    { type: 'fog', duration: 2000 },
-    { type: 'flash', duration: 1000 },
-    { type: 'stun', duration: 1500 },
-    { type: 'shake', duration: 1500 }
-  ];
+ const isTimeAttack = room.gameMode.startsWith('timeAttack');
+
+let powers = [
+  { type: 'fog', duration: 10000 },      // ✅ 10s
+  { type: 'stun', duration: 5000 },      // ✅ 5s
+  { type: 'flash', duration: 3000 },     // ✅ 3s
+  { type: 'shake', duration: 15000 },    // ✅ 15s
+  { type: 'cell_eraser', duration: 1000 } // ✅ Tous modes powerup
+];
+
+// ✅ TIME DRAIN uniquement en Time Attack
+if (isTimeAttack) {
+  powers.push({ type: 'time_drain', duration: 1500 });
+}
   
-  const randomPower = powers[Math.floor(Math.random() * powers.length)];
-  const targetSelf = Math.random() < 0.40;
+ const randomPower = powers[Math.floor(Math.random() * powers.length)];
+const opponentSocketId = getOpponentSocketId(roomId, playerId);
+
+// ⏱️ TIME DRAIN - Voler 15 secondes (Time Attack uniquement)
+if (randomPower.type === 'time_drain' && room.isTimeAttack) {
+  const stolenSeconds = 15000; // 15s
   
-  const opponentSocketId = getOpponentSocketId(roomId, playerId);
+  room.endTime = Math.max(Date.now(), room.endTime - stolenSeconds);
   
-  if (targetSelf) {
-    console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
-    socket.emit('powerup_triggered', {
+  console.log(`⏱️ ${player.playerName} VOLE 15s à l'adversaire`);
+  
+  if (opponentSocketId) {
+    io.to(opponentSocketId).emit('powerup_triggered', {
+      type: 'time_drain',
+      duration: randomPower.duration
+    });
+  }
+  
+  return; // ✅ Fin du handler
+}
+
+// 🗑️ CELL ERASER - Effacer 1-2 cellules
+if (randomPower.type === 'cell_eraser') {
+  const opponentId = Object.keys(room.players).find(id => id !== playerId);
+  const opponent = room.players[opponentId];
+  
+  if (!opponent) return;
+  
+  // 🎯 Trouver cellules non-vides (fixes ou jouées)
+  const filledCells = [];
+  for (let r = 0; r < 9; r++) {
+    for (let c = 0; c < 9; c++) {
+      if (opponent.grid[r][c] !== 0) {
+        filledCells.push({ row: r, col: c });
+      }
+    }
+  }
+  
+  if (filledCells.length === 0) {
+    console.log(`⚠️ Aucune cellule à effacer`);
+    return;
+  }
+  
+  // 🎲 Effacer 1 ou 2 cellules aléatoires
+  const toErase = Math.min(2, filledCells.length);
+  const erasedCells = [];
+  
+  for (let i = 0; i < toErase; i++) {
+    const randomIndex = Math.floor(Math.random() * filledCells.length);
+    const cell = filledCells.splice(randomIndex, 1)[0];
+    
+    opponent.grid[cell.row][cell.col] = 0;
+    erasedCells.push(cell);
+  }
+  
+  // ♻️ Recalculer progress
+  opponent.progress = calculateProgress(opponent.grid);
+  opponent.correctMoves = Math.max(0, opponent.correctMoves - toErase);
+  
+  console.log(`🗑️ ${player.playerName} EFFACE ${toErase} cellule(s) de ${opponent.playerName}`);
+  
+  // 📤 Envoyer à la victime
+  if (opponentSocketId) {
+    io.to(opponentSocketId).emit('powerup_triggered', {
+      type: 'cell_eraser',
+      duration: randomPower.duration
+    });
+    
+    io.to(opponentSocketId).emit('cells_erased', {
+      erasedCells: erasedCells,
+      newGrid: opponent.grid,
+      newProgress: opponent.progress
+    });
+  }
+  
+  // 📤 Update attaquant (progress baisse)
+  io.to(player.socketId).emit('opponentProgress', {
+    progress: opponent.progress,
+    correctMoves: opponent.correctMoves,
+    errors: opponent.errors,
+    combo: opponent.combo
+  });
+  
+  return; // ✅ Fin du handler
+}
+
+// ✅ POWER-UPS NORMAUX (fog/stun/flash/shake)
+const targetSelf = Math.random() < 0.40;
+
+if (targetSelf) {
+  console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
+  socket.emit('powerup_triggered', {
+    type: randomPower.type,
+    duration: randomPower.duration
+  });
+} else {
+  console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
+  if (opponentSocketId) {
+    io.to(opponentSocketId).emit('powerup_triggered', {
       type: randomPower.type,
       duration: randomPower.duration
     });
-  } else {
-    console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
-    if (opponentSocketId) {
-      io.to(opponentSocketId).emit('powerup_triggered', {
-        type: randomPower.type,
-        duration: randomPower.duration
-      });
-    }
   }
+}
 });
 
   socket.on('heartbeat', (data) => {
