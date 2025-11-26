@@ -694,66 +694,85 @@ socket.on('joinQueue', (data) => {
       });
     }
     
-    if (player.progress >= 81) {
-      if (room.isTimeAttack) {
-        console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack) - En attente timer`);
-        
-        player.completedEarly = true;
-        
-        io.to(player.socketId).emit('grid_completed', {
-          completionBonus: 500,
-          waitingForTimer: true
-        });
-        
-        return;
+    // ✅ VÉRIFIER SI GRILLE RÉELLEMENT TERMINÉE
+if (player.progress >= 81) {
+  // ✅ Vérifier que TOUTES les cellules sont correctes
+  let isActuallyComplete = true;
+  for (let r = 0; r < 9; r++) {
+    for (let c = 0; c < 9; c++) {
+      if (player.grid[r][c] !== player.solution[r][c]) {
+        isActuallyComplete = false;
+        break;
       }
-      
-      room.status = 'finished';
-      
-      const opponentId = Object.keys(room.players).find(id => id !== playerId);
-      const opponent = room.players[opponentId];
-      
-      const elapsed = (Date.now() - room.startTime) / 1000;
-      const winnerScore = calculateScore(player, elapsed);
-      const loserScore = calculateScore(opponent, elapsed);
-      
-      console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
-      
-      const result = {
-        winnerId: playerId,
-        winnerName: player.playerName,
-        winnerScore,
-        loserId: opponentId,
-        loserName: opponent.playerName,
-        loserScore,
-        reason: 'completed'
-      };
-      
-      const winnerConnected = io.sockets.sockets.has(player.socketId);
-      const loserConnected = io.sockets.sockets.has(opponent.socketId);
-      
-      if (winnerConnected) {
-        io.to(player.socketId).emit('game_over', result);
-        console.log(`✅ game_over envoyé au gagnant`);
-      } else {
-        finishedGames[playerId] = { result, timestamp: Date.now() };
-        console.log(`💾 Résultat sauvegardé pour gagnant (déco)`);
-      }
-      
-      if (loserConnected) {
-        io.to(opponent.socketId).emit('game_over', result);
-        console.log(`✅ game_over envoyé au perdant`);
-      } else {
-        finishedGames[opponentId] = { result, timestamp: Date.now() };
-        console.log(`💾 Résultat sauvegardé pour perdant (déco)`);
-      }
-      
-      Object.values(room.players).forEach(p => {
-        if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
-      });
-      
-      setTimeout(() => delete rooms[roomId], 5000);
     }
+    if (!isActuallyComplete) break;
+  }
+
+  if (!isActuallyComplete) {
+    console.log(`⚠️ ${player.playerName} progress 81/81 mais grille incorrecte`);
+    return;
+  }
+
+  if (room.isTimeAttack) {
+    console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack) - En attente timer`);
+    
+    player.completedEarly = true;
+    
+    io.to(player.socketId).emit('grid_completed', {
+      completionBonus: 500,
+      waitingForTimer: true
+    });
+    
+    return;
+  }
+  
+  // ✅ MODE CLASSIQUE - VICTOIRE IMMÉDIATE
+  room.status = 'finished';
+  
+  const opponentId = Object.keys(room.players).find(id => id !== playerId);
+  const opponent = room.players[opponentId];
+  
+  const elapsed = (Date.now() - room.startTime) / 1000;
+  const winnerScore = calculateScore(player, elapsed);
+  const loserScore = calculateScore(opponent, elapsed);
+  
+  console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
+  
+  const result = {
+    winnerId: playerId,
+    winnerName: player.playerName,
+    winnerScore,
+    loserId: opponentId,
+    loserName: opponent.playerName,
+    loserScore,
+    reason: 'completed'
+  };
+  
+  const winnerConnected = io.sockets.sockets.has(player.socketId);
+  const loserConnected = io.sockets.sockets.has(opponent.socketId);
+  
+  if (winnerConnected) {
+    io.to(player.socketId).emit('game_over', result);
+    console.log(`✅ game_over envoyé au gagnant`);
+  } else {
+    finishedGames[playerId] = { result, timestamp: Date.now() };
+    console.log(`💾 Résultat sauvegardé pour gagnant (déco)`);
+  }
+  
+  if (loserConnected) {
+    io.to(opponent.socketId).emit('game_over', result);
+    console.log(`✅ game_over envoyé au perdant`);
+  } else {
+    finishedGames[opponentId] = { result, timestamp: Date.now() };
+    console.log(`💾 Résultat sauvegardé pour perdant (déco)`);
+  }
+  
+  Object.values(room.players).forEach(p => {
+    if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+  });
+  
+  setTimeout(() => delete rooms[roomId], 5000);
+}
   });
   
   socket.on('trigger_power', (data) => {
@@ -796,18 +815,38 @@ const opponentSocketId = getOpponentSocketId(roomId, playerId);
 
 // ⏱️ TIME DRAIN - Voler 15 secondes (Time Attack uniquement)
 if (randomPower.type === 'time_drain' && room.isTimeAttack) {
-  const stolenSeconds = 15000; // 15s
+  const stolenSeconds = 15000; // 15s en ms
   
+  // ✅ Réduire le temps restant de la room
+  const oldEndTime = room.endTime;
   room.endTime = Math.max(Date.now(), room.endTime - stolenSeconds);
   
-  console.log(`⏱️ ${player.playerName} VOLE 15s à l'adversaire`);
+  const actualStolen = oldEndTime - room.endTime;
   
+  console.log(`⏱️ ${player.playerName} VOLE ${actualStolen / 1000}s`);
+  console.log(`   Ancien timer: ${new Date(oldEndTime).toISOString()}`);
+  console.log(`   Nouveau timer: ${new Date(room.endTime).toISOString()}`);
+  
+  const opponentSocketId = getOpponentSocketId(roomId, playerId);
+  
+  // 📤 Notifier les 2 joueurs
   if (opponentSocketId) {
     io.to(opponentSocketId).emit('powerup_triggered', {
       type: 'time_drain',
       duration: randomPower.duration
     });
+    
+    io.to(opponentSocketId).emit('time_drained', {
+      newEndTime: room.endTime,
+      stolenMs: actualStolen
+    });
   }
+  
+  // 📤 Notifier l'attaquant aussi
+  io.to(player.socketId).emit('time_drained', {
+    newEndTime: room.endTime,
+    stolenMs: actualStolen
+  });
   
   return; // ✅ Fin du handler
 }
@@ -819,28 +858,31 @@ if (randomPower.type === 'cell_eraser') {
   
   if (!opponent) return;
   
-  // 🎯 Trouver cellules non-vides (fixes ou jouées)
-  const filledCells = [];
+  // 🎯 Trouver cellules NON-FIXES validées par le joueur
+  const validatedCells = [];
   for (let r = 0; r < 9; r++) {
     for (let c = 0; c < 9; c++) {
-      if (opponent.grid[r][c] !== 0) {
-        filledCells.push({ row: r, col: c });
+      const isInitialCell = room.initialPuzzle[r][c] !== 0;
+      const isFilledByPlayer = opponent.grid[r][c] !== 0 && !isInitialCell;
+      
+      if (isFilledByPlayer) {
+        validatedCells.push({ row: r, col: c });
       }
     }
   }
   
-  if (filledCells.length === 0) {
-    console.log(`⚠️ Aucune cellule à effacer`);
+  if (validatedCells.length === 0) {
+    console.log(`⚠️ Aucune cellule jouée à effacer`);
     return;
   }
   
   // 🎲 Effacer 1 ou 2 cellules aléatoires
-  const toErase = Math.min(2, filledCells.length);
+  const toErase = Math.min(2, validatedCells.length);
   const erasedCells = [];
   
   for (let i = 0; i < toErase; i++) {
-    const randomIndex = Math.floor(Math.random() * filledCells.length);
-    const cell = filledCells.splice(randomIndex, 1)[0];
+    const randomIndex = Math.floor(Math.random() * validatedCells.length);
+    const cell = validatedCells.splice(randomIndex, 1)[0];
     
     opponent.grid[cell.row][cell.col] = 0;
     erasedCells.push(cell);
@@ -851,6 +893,7 @@ if (randomPower.type === 'cell_eraser') {
   opponent.correctMoves = Math.max(0, opponent.correctMoves - toErase);
   
   console.log(`🗑️ ${player.playerName} EFFACE ${toErase} cellule(s) de ${opponent.playerName}`);
+  console.log(`   Nouveau progress: ${opponent.progress}/81`);
   
   // 📤 Envoyer à la victime
   if (opponentSocketId) {
