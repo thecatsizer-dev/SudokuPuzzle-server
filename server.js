@@ -954,24 +954,36 @@ if (randomPower.type === 'time_drain' && room.isTimeAttack) {
   }
   
   // 📤 Notifier les 2 joueurs
-  if (opponentSocketId) {
-    io.to(opponentSocketId).emit('powerup_triggered', {
-      type: 'time_drain',
-      duration: randomPower.duration
-    });
-    
-    io.to(opponentSocketId).emit('time_drained', {
-      drainingPlayerId: playerId,
-      timeReduced: stolenMs,
-      timeBoosted: 0
-    });
-  }
-  
-  io.to(player.socketId).emit('time_drained', {
-    drainingPlayerId: playerId,
-    timeReduced: 0,
-    timeBoosted: stolenMs
+if (opponentSocketId) {
+  io.to(opponentSocketId).emit('powerup_triggered', {
+    type: 'time_drain',
+    duration: randomPower.duration
   });
+  
+  // ✅✅✅ ENVOYER LES NOUVEAUX TEMPS + VALEURS MODIFIÉES
+  io.to(opponentSocketId).emit('time_drained', {
+    drainingPlayerId: playerId,
+    newEndTime: opponent.personalEndTime,  // ✅ Nouveau timestamp
+    timeReduced: stolenMs,  // ✅ Temps perdu
+    timeBoosted: 0          // ✅ Pas de bonus pour la victime
+  });
+  
+  console.log(`📤 time_drained envoyé à ${opponent.playerName}:`);
+  console.log(`   newEndTime: ${opponent.personalEndTime}`);
+  console.log(`   timeReduced: ${stolenMs}ms`);
+}
+
+// ✅✅✅ ENVOYER AU DRAINER
+io.to(player.socketId).emit('time_drained', {
+  drainingPlayerId: playerId,
+  newEndTime: player.personalEndTime,  // ✅ Nouveau timestamp
+  timeReduced: 0,          // ✅ Pas de perte pour l'attaquant
+  timeBoosted: stolenMs    // ✅ Temps gagné
+});
+
+console.log(`📤 time_drained envoyé à ${player.playerName}:`);
+console.log(`   newEndTime: ${player.personalEndTime}`);
+console.log(`   timeBoosted: ${stolenMs}ms`);
   
   return;
 }
