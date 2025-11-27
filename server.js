@@ -323,65 +323,67 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
     const isTimeAttack = gameMode.startsWith('timeAttack');
     const timeLimit = isTimeAttack ? TIME_ATTACK_DURATIONS[gameMode] : null;
 
-    rooms[roomId] = {
-      roomId,
-      gameMode,
-      difficulty,
-      initialPuzzle: frozenInitialPuzzle,
-      players: {
-        [playerId]: {
-          playerId, playerName,
-          socketId: myCurrentSocketId,
-          grid: JSON.parse(JSON.stringify(puzzle)),
-          solution: JSON.parse(JSON.stringify(solution)),
-          correctMoves: 0, errors: 0, combo: 0, energy: 0,
-          progress: calculateProgress(puzzle), speed: 0, 
-          lastMoveTime: Date.now(),
-          inactivityTimer: null,
-          completedEarly: false,
-          // ✅✅✅ TIMER INDIVIDUEL
-          personalEndTime: isTimeAttack ? (Date.now() + timeLimit) : null,
-          hasFinished: false,
-          finalScore: 0
-        },
-        [opponent.playerId]: {
-          playerId: opponent.playerId,
-          playerName: opponent.playerName,
-          socketId: opponentCurrentSocketId,
-          grid: JSON.parse(JSON.stringify(puzzle)),
-          solution: JSON.parse(JSON.stringify(solution)),
-          correctMoves: 0, errors: 0, combo: 0, energy: 0,
-          progress: calculateProgress(puzzle), speed: 0, 
-          lastMoveTime: Date.now(),
-          inactivityTimer: null,
-          completedEarly: false,
-          // ✅✅✅ TIMER INDIVIDUEL
-          personalEndTime: isTimeAttack ? (Date.now() + timeLimit) : null,
-          hasFinished: false,
-          finalScore: 0
-        }
-      },
-      status: 'playing',
-      startTime: Date.now(),
-      isTimeAttack,
-      timeLimit
-    };
+  rooms[roomId] = {
+  roomId,
+  gameMode,
+  difficulty,
+  initialPuzzle: frozenInitialPuzzle,
+  players: {
+    [playerId]: {
+      playerId, playerName,
+      socketId: myCurrentSocketId,
+      grid: JSON.parse(JSON.stringify(puzzle)),
+      solution: JSON.parse(JSON.stringify(solution)),
+      correctMoves: 0, errors: 0, combo: 0, energy: 0,
+      progress: calculateProgress(puzzle), speed: 0, 
+      lastMoveTime: Date.now(),
+      inactivityTimer: null,
+      completedEarly: false,
+      personalEndTime: isTimeAttack ? (Date.now() + timeLimit) : null,
+      hasFinished: false,
+      finalScore: 0,
+      timeAttackTimer: null  // ✅✅✅ NOUVEAU
+    },
+    [opponent.playerId]: {
+      playerId: opponent.playerId,
+      playerName: opponent.playerName,
+      socketId: opponentCurrentSocketId,
+      grid: JSON.parse(JSON.stringify(puzzle)),
+      solution: JSON.parse(JSON.stringify(solution)),
+      correctMoves: 0, errors: 0, combo: 0, energy: 0,
+      progress: calculateProgress(puzzle), speed: 0, 
+      lastMoveTime: Date.now(),
+      inactivityTimer: null,
+      completedEarly: false,
+      personalEndTime: isTimeAttack ? (Date.now() + timeLimit) : null,
+      hasFinished: false,
+      finalScore: 0,
+      timeAttackTimer: null  // ✅✅✅ NOUVEAU
+    }
+  },
+  status: 'playing',
+  startTime: Date.now(),
+  isTimeAttack,
+  timeLimit
+};
     
     setupPlayerInactivityTimer(roomId, playerId);
     setupPlayerInactivityTimer(roomId, opponent.playerId);
     
-    // ✅✅✅ TIMER INDIVIDUEL PAR JOUEUR
-    if (isTimeAttack) {
-      // Timer pour joueur 1
-      setTimeout(() => {
-        handlePlayerTimeExpired(roomId, playerId);
-      }, timeLimit);
-      
-      // Timer pour joueur 2
-      setTimeout(() => {
-        handlePlayerTimeExpired(roomId, opponent.playerId);
-      }, timeLimit);
-    }
+   // ✅✅✅ TIMER INDIVIDUEL PAR JOUEUR - STOCKÉS POUR ANNULATION
+if (isTimeAttack) {
+  // Timer pour joueur 1
+  rooms[roomId].players[playerId].timeAttackTimer = setTimeout(() => {
+    handlePlayerTimeExpired(roomId, playerId);
+  }, timeLimit);
+  
+  // Timer pour joueur 2
+  rooms[roomId].players[opponent.playerId].timeAttackTimer = setTimeout(() => {
+    handlePlayerTimeExpired(roomId, opponent.playerId);
+  }, timeLimit);
+  
+  console.log(`⏱️ Timers TIME ATTACK créés (${timeLimit/1000}s)`);
+}
     
     console.log(`🎮 Match ${gameMode}/${difficulty}: ${playerName} vs ${opponent.playerName}`);
     
@@ -893,52 +895,86 @@ socket.on('joinQueue', (data) => {
   const randomPower = powers[Math.floor(Math.random() * powers.length)];
   const opponentSocketId = getOpponentSocketId(roomId, playerId);
 
-  // ⏱️ TIME DRAIN - Voler 15 secondes
-  if (randomPower.type === 'time_drain' && room.isTimeAttack) {
-    const stolenMs = 15000; // 15s
-    
-    const opponentId = Object.keys(room.players).find(id => id !== playerId);
-    const opponent = room.players[opponentId];
-    
-    if (!opponent) return;
-    
-    // ✅✅✅ MODIFIER LES TIMERS INDIVIDUELS
-    const now = Date.now();
-    
-    // Adversaire perd 15s
-    if (opponent.personalEndTime) {
-      opponent.personalEndTime = Math.max(now, opponent.personalEndTime - stolenMs);
-      console.log(`⏱️ ${opponent.playerName} PERD 15s`);
-    }
-    
-    // Attaquant gagne 15s
-    if (player.personalEndTime) {
-      player.personalEndTime = player.personalEndTime + stolenMs;
-      console.log(`⏱️ ${player.playerName} GAGNE 15s`);
-    }
-    
-    // 📤 Notifier les 2 joueurs
-    if (opponentSocketId) {
-      io.to(opponentSocketId).emit('powerup_triggered', {
-        type: 'time_drain',
-        duration: randomPower.duration
-      });
-      
-      io.to(opponentSocketId).emit('time_drained', {
-        newEndTime: opponent.personalEndTime,
-        stolenMs: stolenMs,
-        drainingPlayerId: playerId
-      });
-    }
-    
-    io.to(player.socketId).emit('time_drained', {
-      newEndTime: player.personalEndTime,
-      stolenMs: stolenMs,
-      drainingPlayerId: playerId
+ // ⏱️ TIME DRAIN - Voler 15 secondes + RESET TIMERS
+if (randomPower.type === 'time_drain' && room.isTimeAttack) {
+  const stolenMs = 15000; // 15s
+  
+  const opponentId = Object.keys(room.players).find(id => id !== playerId);
+  const opponent = room.players[opponentId];
+  
+  if (!opponent) return;
+  
+  const now = Date.now();
+  
+  // ✅✅✅ CRITIQUE : ANNULER LES ANCIENS TIMERS
+  if (opponent.timeAttackTimer) {
+    clearTimeout(opponent.timeAttackTimer);
+    console.log(`🔄 Timer adversaire ANNULÉ`);
+  }
+  
+  if (player.timeAttackTimer) {
+    clearTimeout(player.timeAttackTimer);
+    console.log(`🔄 Timer attaquant ANNULÉ`);
+  }
+  
+  // ✅ MODIFIER LES TEMPS
+  if (opponent.personalEndTime) {
+    opponent.personalEndTime = Math.max(now, opponent.personalEndTime - stolenMs);
+    console.log(`⏱️ ${opponent.playerName} PERD 15s`);
+  }
+  
+  if (player.personalEndTime) {
+    player.personalEndTime = player.personalEndTime + stolenMs;
+    console.log(`⏱️ ${player.playerName} GAGNE 15s`);
+  }
+  
+  // ✅✅✅ RECRÉER LES TIMERS AVEC LES NOUVELLES DURÉES
+  const opponentTimeRemaining = Math.max(0, opponent.personalEndTime - now);
+  const playerTimeRemaining = Math.max(0, player.personalEndTime - now);
+  
+  console.log(`⏱️ NOUVEAUX TIMERS:`);
+  console.log(`   ${opponent.playerName}: ${Math.round(opponentTimeRemaining/1000)}s restantes`);
+  console.log(`   ${player.playerName}: ${Math.round(playerTimeRemaining/1000)}s restantes`);
+  
+  // Timer adversaire (temps réduit)
+  if (opponentTimeRemaining > 0) {
+    opponent.timeAttackTimer = setTimeout(() => {
+      handlePlayerTimeExpired(roomId, opponentId);
+    }, opponentTimeRemaining);
+  } else {
+    // Temps déjà écoulé → expiration immédiate
+    handlePlayerTimeExpired(roomId, opponentId);
+  }
+  
+  // Timer attaquant (temps augmenté)
+  if (playerTimeRemaining > 0) {
+    player.timeAttackTimer = setTimeout(() => {
+      handlePlayerTimeExpired(roomId, playerId);
+    }, playerTimeRemaining);
+  }
+  
+  // 📤 Notifier les 2 joueurs
+  if (opponentSocketId) {
+    io.to(opponentSocketId).emit('powerup_triggered', {
+      type: 'time_drain',
+      duration: randomPower.duration
     });
     
-    return;
+    io.to(opponentSocketId).emit('time_drained', {
+      drainingPlayerId: playerId,
+      timeReduced: stolenMs,
+      timeBoosted: 0
+    });
   }
+  
+  io.to(player.socketId).emit('time_drained', {
+    drainingPlayerId: playerId,
+    timeReduced: 0,
+    timeBoosted: stolenMs
+  });
+  
+  return;
+}
 
 // 🗑️ CELL ERASER - Effacer 1-2 cellules
 if (randomPower.type === 'cell_eraser') {
