@@ -404,9 +404,17 @@ if (isTimeAttack) {
       gameMode,
       difficulty
     });
-    
-    return true;
-  }
+     // ✅✅✅ BACKUP : BROADCASTER LE MODE 500ms APRÈS
+  setTimeout(() => {
+    if (rooms[roomId]) {
+      io.to(myCurrentSocketId).emit('game_mode_sync', { gameMode });
+      io.to(opponentCurrentSocketId).emit('game_mode_sync', { gameMode });
+      console.log(`🔄 game_mode_sync envoyé: ${gameMode}`);
+    }
+  }, 500);
+  
+  return true;
+}
   
   return false;
 }
