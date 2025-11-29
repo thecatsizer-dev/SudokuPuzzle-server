@@ -86,6 +86,42 @@ function calculateProgress(grid) {
   }
   return filled;
 }
+function getBasePointsPerCell(difficulty) {
+  const points = {
+    easy: 15,
+    medium: 30,
+    hard: 40,
+    expert: 50
+  };
+  return points[difficulty] || 30;
+}
+
+function getComboMultiplier(combo) {
+  if (combo >= 15) return 3.0;
+  if (combo >= 8) return 2.0;
+  if (combo >= 3) return 1.5;
+  return 1.0;
+}
+
+function getErrorPenalty(difficulty) {
+  const penalties = {
+    easy: 30,
+    medium: 50,
+    hard: 80,
+    expert: 120
+  };
+  return penalties[difficulty] || 50;
+}
+
+function getErrorLimit(difficulty) {
+  const limits = {
+    easy: 5,
+    medium: 3,
+    hard: 3,
+    expert: 2
+  };
+  return limits[difficulty] || 3;
+}
 
 function calculateScore(player, timeInSeconds) {
   const baseScore = 1000;
@@ -623,7 +659,9 @@ io.on('connection', (socket) => {
   });
   
   // ✅✅✅ HANDLER SÉCURISÉ cell_played
-  socket.on('cell_played', (data) => {
+ // ========== LIGNE ~950 - REMPLACER HANDLER cell_played ==========
+
+socket.on('cell_played', (data) => {
   const { roomId, playerId, row, col, value } = data;
   
   const room = rooms[roomId];
@@ -652,40 +690,51 @@ io.on('connection', (socket) => {
   
   player.grid[row][col] = value;
   
-  // ✅✅✅ FIX CRITIQUE - ENERGY CUMULATIVE (PAS DE RESET)
+  // ✅✅✅ CALCUL POINTS + MULTIPLICATEUR
+  let pointsGained = 0;
+  
   if (isCorrect) {
     player.correctMoves++;
     player.combo++;
     
-    // ✅✅✅ NOUVEAU CALCUL : +1 ENERGY UNIQUEMENT TOUS LES 5 COMBOS (5, 10, 15, 20...)
+    // ✅ CALCULER POINTS AVEC MULTIPLICATEUR
+    const basePoints = getBasePointsPerCell(room.difficulty);
+    const multiplier = getComboMultiplier(player.combo);
+    pointsGained = Math.round(basePoints * multiplier);
+    
+    // ✅ AJOUTER AU SCORE
+    player.currentScore = (player.currentScore || 0) + pointsGained;
+    
+    console.log(`✅ ${player.playerName} Combo=${player.combo} x${multiplier} → +${pointsGained}pts (Total: ${player.currentScore})`);
+    
+    // ✅ ENERGY (modes powerup uniquement)
     if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
-      const oldEnergy = player.energy;
-      
-      // ✅ +1 energy SEULEMENT si combo atteint un multiple de 5
       if (player.combo > 0 && player.combo % 5 === 0) {
         player.energy++;
-        console.log(`⚡ ${player.playerName} Combo=${player.combo} → Energy +1 (Ancien: ${oldEnergy}, Nouveau: ${player.energy})`);
-      } else {
-        console.log(`📊 ${player.playerName} Combo=${player.combo} → Energy reste ${player.energy} (prochain seuil: ${Math.ceil(player.combo / 5) * 5})`);
+        console.log(`⚡ ${player.playerName} Combo=${player.combo} → Energy +1 (Total: ${player.energy})`);
       }
     }
   } else {
     player.errors++;
     player.combo = 0;
     
-    // ✅ RESET ENERGY EN CAS D'ERREUR
+    // ✅ PÉNALITÉ
+    const penalty = getErrorPenalty(room.difficulty);
+    player.currentScore = Math.max(0, (player.currentScore || 0) - penalty);
+    
+    console.log(`❌ ${player.playerName} Erreur → Combo=0, -${penalty}pts (Total: ${player.currentScore})`);
+    
+    // ✅ RESET ENERGY
     if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
       player.energy = 0;
-      console.log(`❌ ${player.playerName} Erreur → Combo=0, Energy=0`);
     }
   }
   
   player.progress = calculateProgress(player.grid);
   
-  console.log(`🎯 ${player.playerName} [${row}][${col}]=${value} → ${isCorrect ? '✅' : '❌'} | Progress=${player.progress}/81 | Combo=${player.combo} | Energy=${player.energy}`);
-  
   resetPlayerInactivityTimer(roomId, playerId);
   
+  // ✅ NOTIFIER ADVERSAIRE
   const opponentSocketId = getOpponentSocketId(roomId, playerId);
   if (opponentSocketId) {
     io.to(opponentSocketId).emit('opponentProgress', {
@@ -699,15 +748,67 @@ io.on('connection', (socket) => {
     });
   }
   
-  // ✅✅✅ ENVOYER stats_update UNE SEULE FOIS
+  // ✅✅✅ ENVOYER STATS COMPLÈTES AU JOUEUR
   io.to(player.socketId).emit('stats_update', {
     correctMoves: player.correctMoves,
     errors: player.errors,
     combo: player.combo,
     energy: player.energy,
-    progress: player.progress
+    progress: player.progress,
+    currentScore: player.currentScore,        // ✅ NOUVEAU
+    pointsGained: pointsGained,               // ✅ NOUVEAU
+    comboMultiplier: getComboMultiplier(player.combo) // ✅ NOUVEAU
   });
+  
+  // ✅ VÉRIFIER LIMITE ERREURS
+  const errorLimit = getErrorLimit(room.difficulty);
+  if (!isCorrect && player.errors >= errorLimit) {
+    console.log(`🚨 ${player.playerName} LIMITE ERREURS: ${player.errors}/${errorLimit}`);
     
+    room.status = 'finished';
+    
+    const opponentId = Object.keys(room.players).find(id => id !== playerId);
+    const opponent = room.players[opponentId];
+    
+    const winnerScore = opponent.currentScore || calculateFinalScore(room, opponent);
+    const loserScore = 0;
+    
+    console.log(`🏆 ${opponent.playerName} GAGNE par erreurs! ${winnerScore}pts vs ${loserScore}pts`);
+    
+    const result = {
+      winnerId: opponentId,
+      winnerName: opponent.playerName,
+      winnerScore,
+      loserId: playerId,
+      loserName: player.playerName,
+      loserScore,
+      reason: 'too_many_errors'
+    };
+    
+    const winnerConnected = io.sockets.sockets.has(opponent.socketId);
+    const loserConnected = io.sockets.sockets.has(player.socketId);
+    
+    if (winnerConnected) {
+      io.to(opponent.socketId).emit('game_over', result);
+    } else {
+      finishedGames[opponentId] = { result, timestamp: Date.now() };
+    }
+    
+    if (loserConnected) {
+      io.to(player.socketId).emit('game_over', result);
+    } else {
+      finishedGames[playerId] = { result, timestamp: Date.now() };
+    }
+    
+    Object.values(room.players).forEach(p => {
+      if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+      if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
+    });
+    
+    setTimeout(() => delete rooms[roomId], 5000);
+    return;
+  }
+  
   // ✅ VÉRIFIER GRILLE COMPLÈTE
   if (player.progress >= 81) {
     let isActuallyComplete = true;
@@ -731,7 +832,7 @@ io.on('connection', (socket) => {
       
       player.completedEarly = true;
       player.hasFinished = true;
-      player.finalScore = calculateTimeAttackScore(player);
+      player.finalScore = player.currentScore + 500; // ✅ Bonus completion
       
       io.to(player.socketId).emit('grid_completed', {
         completionBonus: 500,
@@ -754,9 +855,8 @@ io.on('connection', (socket) => {
     const opponentId = Object.keys(room.players).find(id => id !== playerId);
     const opponent = room.players[opponentId];
     
-    const elapsed = (Date.now() - room.startTime) / 1000;
-    const winnerScore = calculateScore(player, elapsed);
-    const loserScore = calculateScore(opponent, elapsed);
+    const winnerScore = player.currentScore;
+    const loserScore = opponent.currentScore || 0;
     
     console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
     
