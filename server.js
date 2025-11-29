@@ -1,6 +1,4 @@
-// ========== REMPLACER INTÉGRALEMENT server.js ==========
-
-// server.js - BACKEND SOCKET.IO v15 - SÉCURITÉ RENFORCÉE
+// server.js - BACKEND SOCKET.IO v16 - POOL SYSTEM CORRIGÉ
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -86,6 +84,7 @@ function calculateProgress(grid) {
   }
   return filled;
 }
+
 function getBasePointsPerCell(difficulty) {
   const points = {
     easy: 15,
@@ -123,6 +122,28 @@ function getErrorLimit(difficulty) {
   return limits[difficulty] || 3;
 }
 
+// ✅✅✅ NOUVEAU - POOL INITIAL selon difficulté
+function getInitialPool(difficulty) {
+  const pools = {
+    easy: 800,
+    medium: 1500,
+    hard: 2000,
+    expert: 3000
+  };
+  return pools[difficulty] || 1500;
+}
+
+// ✅✅✅ NOUVEAU - DRAIN RATE selon difficulté
+function getDrainRate(difficulty) {
+  const rates = {
+    easy: 1,
+    medium: 2,
+    hard: 3,
+    expert: 4
+  };
+  return rates[difficulty] || 2;
+}
+
 function calculateScore(player, timeInSeconds) {
   const baseScore = 1000;
   const timeBonus = Math.max(0, 3600 - timeInSeconds);
@@ -152,8 +173,8 @@ function calculateFinalScore(room, player) {
   if (isTimeAttack) {
     return calculateTimeAttackScore(player);
   } else {
-    const elapsed = (Date.now() - room.startTime) / 1000;
-    return calculateScore(player, elapsed);
+    // ✅ MODE CLASSIC/POWERUP → Retourner currentScore (pool)
+    return player.currentScore || 0;
   }
 }
 
@@ -273,6 +294,11 @@ function setupPlayerInactivityTimer(roomId, playerId) {
       if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
     });
     
+    // ✅ CLEANUP DRAIN INTERVAL
+    if (room.drainInterval) {
+      clearInterval(room.drainInterval);
+    }
+    
     delete rooms[roomId];
     console.log(`🏁 Room ${roomId} supprimée (inactivité)`);
     
@@ -328,6 +354,9 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
     const isTimeAttack = gameMode.startsWith('timeAttack');
     const timeLimit = isTimeAttack ? TIME_ATTACK_DURATIONS[gameMode] : null;
 
+    // ✅✅✅ POOL INITIAL pour classic/powerup uniquement
+    const initialScore = isTimeAttack ? 0 : getInitialPool(difficulty);
+
     rooms[roomId] = {
       roomId,
       gameMode,
@@ -343,7 +372,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
           errors: 0, 
           combo: 0, 
           energy: 0,
-          currentScore: 0,  // ✅ AJOUTÉ
+          currentScore: initialScore, // ✅ POOL INITIAL
           progress: calculateProgress(puzzle), 
           speed: 0, 
           lastMoveTime: Date.now(),
@@ -364,7 +393,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
           errors: 0, 
           combo: 0, 
           energy: 0,
-          currentScore: 0,  // ✅ AJOUTÉ
+          currentScore: initialScore, // ✅ POOL INITIAL
           progress: calculateProgress(puzzle), 
           speed: 0, 
           lastMoveTime: Date.now(),
@@ -379,7 +408,8 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
       status: 'playing',
       startTime: Date.now(),
       isTimeAttack,
-      timeLimit
+      timeLimit,
+      drainInterval: null // ✅ NOUVEAU
     };
     
     setupPlayerInactivityTimer(roomId, playerId);
@@ -395,6 +425,32 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
       }, timeLimit);
       
       console.log(`⏱️ Timers TIME ATTACK créés (${timeLimit/1000}s)`);
+    } else {
+      // ✅✅✅ ACTIVER DRAIN POOL pour classic/powerup
+      const drainRate = getDrainRate(difficulty);
+      console.log(`💧 Activation drain pool ${difficulty} (${drainRate}pts/sec)`);
+      
+      rooms[roomId].drainInterval = setInterval(() => {
+        if (!rooms[roomId] || rooms[roomId].status !== 'playing') {
+          clearInterval(rooms[roomId].drainInterval);
+          return;
+        }
+        
+        Object.values(rooms[roomId].players).forEach(p => {
+          if (!p.hasFinished) {
+            p.currentScore = Math.max(0, p.currentScore - drainRate);
+            
+            // Envoyer update au client
+            const playerSocket = io.sockets.sockets.get(p.socketId);
+            if (playerSocket && playerSocket.connected) {
+              playerSocket.emit('score_drained', {
+                currentScore: p.currentScore,
+                drainRate: drainRate
+              });
+            }
+          }
+        });
+      }, 1000); // Chaque seconde
     }
     
     console.log(`🎮 Match ${gameMode}/${difficulty}: ${playerName} vs ${opponent.playerName}`);
@@ -443,7 +499,7 @@ function handlePlayerTimeExpired(roomId, playerId) {
   console.log(`⏰ TIMER EXPIRÉ - ${player.playerName}`);
   
   player.hasFinished = true;
-  player.finalScore = calculateTimeAttackScore(player);
+  player.finalScore = player.currentScore; // ✅ Utiliser currentScore
   
   const playerConnected = io.sockets.sockets.has(player.socketId);
   if (playerConnected) {
@@ -470,8 +526,8 @@ function endTimeAttackGame(roomId) {
   const players = Object.values(room.players);
   const [p1, p2] = players;
   
-  const score1 = p1.finalScore;
-  const score2 = p2.finalScore;
+  const score1 = p1.finalScore || p1.currentScore;
+  const score2 = p2.finalScore || p2.currentScore;
   
   const winner = score1 > score2 ? p1 : p2;
   const loser = score1 > score2 ? p2 : p1;
@@ -509,6 +565,11 @@ function endTimeAttackGame(roomId) {
     if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
     if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
   });
+  
+  // ✅ CLEANUP DRAIN INTERVAL
+  if (room.drainInterval) {
+    clearInterval(room.drainInterval);
+  }
   
   delete rooms[roomId];
 }
@@ -659,596 +720,608 @@ io.on('connection', (socket) => {
       }
     }
   });
+  // ========== HANDLER cell_played - POOL SYSTEM CORRIGÉ ==========
   
-  // ✅✅✅ HANDLER SÉCURISÉ cell_played
- // ========== LIGNE ~950 - REMPLACER HANDLER cell_played ==========
-
-socket.on('cell_played', (data) => {
-  const { roomId, playerId, row, col, value } = data;
-  
-  const room = rooms[roomId];
-  if (!room) return;
-  
-  const player = room.players[playerId];
-  if (!player) return;
-  
-  if (player.hasFinished) {
-    console.log(`⚠️ ${player.playerName} a fini - Action bloquée`);
-    return;
-  }
-  
-  if (value < 1 || value > 9) {
-    console.log(`⚠️ Valeur invalide: ${value}`);
-    return;
-  }
-  
-  const initialGrid = room.initialPuzzle;
-  if (initialGrid[row][col] !== 0) {
-    console.log(`⚠️ Cellule fixe: [${row}][${col}]`);
-    return;
-  }
-  
-  const isCorrect = (value === player.solution[row][col]);
-  
-  player.grid[row][col] = value;
-  
-  // ✅✅✅ CALCUL POINTS + MULTIPLICATEUR
-  let pointsGained = 0;
-  
-  if (isCorrect) {
-    player.correctMoves++;
-    player.combo++;
+  socket.on('cell_played', (data) => {
+    const { roomId, playerId, row, col, value } = data;
     
-    // ✅ CALCULER POINTS AVEC MULTIPLICATEUR
-    const basePoints = getBasePointsPerCell(room.difficulty);
-    const multiplier = getComboMultiplier(player.combo);
-    pointsGained = Math.round(basePoints * multiplier);
+    const room = rooms[roomId];
+    if (!room) return;
     
-    // ✅ AJOUTER AU SCORE
-    player.currentScore = (player.currentScore || 0) + pointsGained;
+    const player = room.players[playerId];
+    if (!player) return;
     
-    console.log(`✅ ${player.playerName} Combo=${player.combo} x${multiplier} → +${pointsGained}pts (Total: ${player.currentScore})`);
+    if (player.hasFinished) {
+      console.log(`⚠️ ${player.playerName} a fini - Action bloquée`);
+      return;
+    }
     
-    // ✅ ENERGY (modes powerup uniquement)
-    if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
-      if (player.combo > 0 && player.combo % 5 === 0) {
-        player.energy++;
-        console.log(`⚡ ${player.playerName} Combo=${player.combo} → Energy +1 (Total: ${player.energy})`);
+    if (value < 1 || value > 9) {
+      console.log(`⚠️ Valeur invalide: ${value}`);
+      return;
+    }
+    
+    const initialGrid = room.initialPuzzle;
+    if (initialGrid[row][col] !== 0) {
+      console.log(`⚠️ Cellule fixe: [${row}][${col}]`);
+      return;
+    }
+    
+    const isCorrect = (value === player.solution[row][col]);
+    
+    player.grid[row][col] = value;
+    
+    // ✅✅✅ CALCUL POINTS AVEC MULTIPLICATEUR
+    let pointsGained = 0;
+    
+    if (isCorrect) {
+      player.correctMoves++;
+      player.combo++;
+      
+      // ✅ CALCULER POINTS AVEC MULTIPLICATEUR
+      const basePoints = getBasePointsPerCell(room.difficulty);
+      const multiplier = getComboMultiplier(player.combo);
+      pointsGained = Math.round(basePoints * multiplier);
+      
+      // ✅✅✅ MODE TIME ATTACK → AJOUTER | MODE CLASSIC/POWERUP → AJOUTER AU POOL
+      player.currentScore = (player.currentScore || 0) + pointsGained;
+      
+      if (room.isTimeAttack) {
+        console.log(`✅ ${player.playerName} [TIME ATTACK] Combo=${player.combo} x${multiplier} → +${pointsGained}pts (Total: ${player.currentScore})`);
+      } else {
+        console.log(`✅ ${player.playerName} [CLASSIC] Combo=${player.combo} x${multiplier} → +${pointsGained}pts (Pool: ${player.currentScore})`);
+      }
+      
+      // ✅ ENERGY (modes powerup uniquement)
+      if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
+        if (player.combo > 0 && player.combo % 5 === 0) {
+          player.energy++;
+          console.log(`⚡ ${player.playerName} Combo=${player.combo} → Energy +1 (Total: ${player.energy})`);
+        }
+      }
+    } else {
+      player.errors++;
+      player.combo = 0;
+      
+      // ✅ PÉNALITÉ (retire du pool ou du score selon mode)
+      const penalty = getErrorPenalty(room.difficulty);
+      player.currentScore = Math.max(0, (player.currentScore || 0) - penalty);
+      
+      if (room.isTimeAttack) {
+        console.log(`❌ ${player.playerName} [TIME ATTACK] Erreur → Combo=0, -${penalty}pts (Total: ${player.currentScore})`);
+      } else {
+        console.log(`❌ ${player.playerName} [CLASSIC] Erreur → Combo=0, -${penalty}pts (Pool: ${player.currentScore})`);
+      }
+      
+      // ✅ RESET ENERGY
+      if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
+        player.energy = 0;
       }
     }
-  } else {
-    player.errors++;
-    player.combo = 0;
     
-    // ✅ PÉNALITÉ
-    const penalty = getErrorPenalty(room.difficulty);
-    player.currentScore = Math.max(0, (player.currentScore || 0) - penalty);
+    player.progress = calculateProgress(player.grid);
     
-    console.log(`❌ ${player.playerName} Erreur → Combo=0, -${penalty}pts (Total: ${player.currentScore})`);
+    resetPlayerInactivityTimer(roomId, playerId);
     
-    // ✅ RESET ENERGY
-    if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
-      player.energy = 0;
+    // ✅ NOTIFIER ADVERSAIRE
+    const opponentSocketId = getOpponentSocketId(roomId, playerId);
+    if (opponentSocketId) {
+      io.to(opponentSocketId).emit('opponentProgress', {
+        progress: player.progress,
+        correctMoves: player.correctMoves,
+        errors: player.errors,
+        combo: player.combo,
+        energy: player.energy,
+        speed: 0,
+        lastAction: isCorrect ? 'correct' : 'error'
+      });
     }
-  }
-  
-  player.progress = calculateProgress(player.grid);
-  
-  resetPlayerInactivityTimer(roomId, playerId);
-  
-  // ✅ NOTIFIER ADVERSAIRE
-  const opponentSocketId = getOpponentSocketId(roomId, playerId);
-  if (opponentSocketId) {
-    io.to(opponentSocketId).emit('opponentProgress', {
-      progress: player.progress,
+    
+    // ✅✅✅ ENVOYER STATS COMPLÈTES AU JOUEUR
+    io.to(player.socketId).emit('stats_update', {
       correctMoves: player.correctMoves,
       errors: player.errors,
       combo: player.combo,
       energy: player.energy,
-      speed: 0,
-      lastAction: isCorrect ? 'correct' : 'error'
-    });
-  }
-  
-  // ✅✅✅ ENVOYER STATS COMPLÈTES AU JOUEUR
-  io.to(player.socketId).emit('stats_update', {
-    correctMoves: player.correctMoves,
-    errors: player.errors,
-    combo: player.combo,
-    energy: player.energy,
-    progress: player.progress,
-    currentScore: player.currentScore,        // ✅ NOUVEAU
-    pointsGained: pointsGained,               // ✅ NOUVEAU
-    comboMultiplier: getComboMultiplier(player.combo) // ✅ NOUVEAU
-  });
-  
-  // ✅ VÉRIFIER LIMITE ERREURS
-  const errorLimit = getErrorLimit(room.difficulty);
-  if (!isCorrect && player.errors >= errorLimit) {
-    console.log(`🚨 ${player.playerName} LIMITE ERREURS: ${player.errors}/${errorLimit}`);
-    
-    room.status = 'finished';
-    
-    const opponentId = Object.keys(room.players).find(id => id !== playerId);
-    const opponent = room.players[opponentId];
-    
-    const winnerScore = opponent.currentScore || calculateFinalScore(room, opponent);
-    const loserScore = 0;
-    
-    console.log(`🏆 ${opponent.playerName} GAGNE par erreurs! ${winnerScore}pts vs ${loserScore}pts`);
-    
-    const result = {
-      winnerId: opponentId,
-      winnerName: opponent.playerName,
-      winnerScore,
-      loserId: playerId,
-      loserName: player.playerName,
-      loserScore,
-      reason: 'too_many_errors'
-    };
-    
-    const winnerConnected = io.sockets.sockets.has(opponent.socketId);
-    const loserConnected = io.sockets.sockets.has(player.socketId);
-    
-    if (winnerConnected) {
-      io.to(opponent.socketId).emit('game_over', result);
-    } else {
-      finishedGames[opponentId] = { result, timestamp: Date.now() };
-    }
-    
-    if (loserConnected) {
-      io.to(player.socketId).emit('game_over', result);
-    } else {
-      finishedGames[playerId] = { result, timestamp: Date.now() };
-    }
-    
-    Object.values(room.players).forEach(p => {
-      if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
-      if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
+      progress: player.progress,
+      currentScore: player.currentScore,
+      pointsGained: pointsGained,
+      comboMultiplier: getComboMultiplier(player.combo)
     });
     
-    setTimeout(() => delete rooms[roomId], 5000);
-    return;
-  }
-  
-  // ✅ VÉRIFIER GRILLE COMPLÈTE
-  if (player.progress >= 81) {
-    let isActuallyComplete = true;
-    for (let r = 0; r < 9; r++) {
-      for (let c = 0; c < 9; c++) {
-        if (player.grid[r][c] !== player.solution[r][c]) {
-          isActuallyComplete = false;
-          break;
-        }
-      }
-      if (!isActuallyComplete) break;
-    }
-
-    if (!isActuallyComplete) {
-      console.log(`⚠️ ${player.playerName} progress 81/81 mais grille incorrecte`);
-      return;
-    }
-
-    if (room.isTimeAttack) {
-      console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack)`);
+    // ✅ VÉRIFIER LIMITE ERREURS
+    const errorLimit = getErrorLimit(room.difficulty);
+    if (!isCorrect && player.errors >= errorLimit) {
+      console.log(`🚨 ${player.playerName} LIMITE ERREURS: ${player.errors}/${errorLimit}`);
       
-      player.completedEarly = true;
-      player.hasFinished = true;
-      player.finalScore = player.currentScore + 500; // ✅ Bonus completion
-      
-      io.to(player.socketId).emit('grid_completed', {
-        completionBonus: 500,
-        waitingForTimer: true
-      });
+      room.status = 'finished';
       
       const opponentId = Object.keys(room.players).find(id => id !== playerId);
       const opponent = room.players[opponentId];
       
-      if (opponent && opponent.hasFinished) {
-        endTimeAttackGame(roomId);
+      const winnerScore = opponent.currentScore || calculateFinalScore(room, opponent);
+      const loserScore = 0;
+      
+      console.log(`🏆 ${opponent.playerName} GAGNE par erreurs! ${winnerScore}pts vs ${loserScore}pts`);
+      
+      const result = {
+        winnerId: opponentId,
+        winnerName: opponent.playerName,
+        winnerScore,
+        loserId: playerId,
+        loserName: player.playerName,
+        loserScore,
+        reason: 'too_many_errors'
+      };
+      
+      const winnerConnected = io.sockets.sockets.has(opponent.socketId);
+      const loserConnected = io.sockets.sockets.has(player.socketId);
+      
+      if (winnerConnected) {
+        io.to(opponent.socketId).emit('game_over', result);
+      } else {
+        finishedGames[opponentId] = { result, timestamp: Date.now() };
       }
       
+      if (loserConnected) {
+        io.to(player.socketId).emit('game_over', result);
+      } else {
+        finishedGames[playerId] = { result, timestamp: Date.now() };
+      }
+      
+      Object.values(room.players).forEach(p => {
+        if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+        if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
+      });
+      
+      // ✅ CLEANUP DRAIN INTERVAL
+      if (room.drainInterval) {
+        clearInterval(room.drainInterval);
+      }
+      
+      setTimeout(() => delete rooms[roomId], 5000);
       return;
     }
     
-    // ✅ MODE CLASSIQUE - VICTOIRE IMMÉDIATE
-    room.status = 'finished';
-    
-    const opponentId = Object.keys(room.players).find(id => id !== playerId);
-    const opponent = room.players[opponentId];
-    
-    const winnerScore = player.currentScore;
-    const loserScore = opponent.currentScore || 0;
-    
-    console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
-    
-    const result = {
-      winnerId: playerId,
-      winnerName: player.playerName,
-      winnerScore,
-      loserId: opponentId,
-      loserName: opponent.playerName,
-      loserScore,
-      reason: 'completed'
-    };
-    
-    const winnerConnected = io.sockets.sockets.has(player.socketId);
-    const loserConnected = io.sockets.sockets.has(opponent.socketId);
-    
-    if (winnerConnected) {
-      io.to(player.socketId).emit('game_over', result);
-    } else {
-      finishedGames[playerId] = { result, timestamp: Date.now() };
-    }
-    
-    if (loserConnected) {
-      io.to(opponent.socketId).emit('game_over', result);
-    } else {
-      finishedGames[opponentId] = { result, timestamp: Date.now() };
-    }
-    
-    Object.values(room.players).forEach(p => {
-      if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
-      if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
-    });
-    
-    setTimeout(() => delete rooms[roomId], 5000);
-  }
-});
-  
-  // ========== LIGNE ~1200 - DANS socket.on('trigger_power') ==========
+    // ✅ VÉRIFIER GRILLE COMPLÈTE
+    if (player.progress >= 81) {
+      let isActuallyComplete = true;
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          if (player.grid[r][c] !== player.solution[r][c]) {
+            isActuallyComplete = false;
+            break;
+          }
+        }
+        if (!isActuallyComplete) break;
+      }
 
-socket.on('trigger_power', (data) => {
-  const { roomId, playerId } = data;
-  
-  const room = rooms[roomId];
-  
-  if (!room || (room.gameMode !== 'powerup' && room.gameMode !== 'timeAttackPowerup')) {
-    console.log(`⚠️ Power-up impossible - Mode: ${room?.gameMode || 'unknown'}`);
-    return;
-  }
-  
-  const player = room.players[playerId];
-  if (!player || player.energy < 1) {
-    console.log(`⚠️ Énergie insuffisante - ${player?.playerName || 'unknown'}: ${player?.energy || 0}`);
-    return;
-  }
-  
-  // ✅✅✅ DÉCRÉMENTER ENERGY CÔTÉ SERVEUR
-  player.energy--;
-  console.log(`⚡ ${player.playerName} utilise power-up → Energy restante: ${player.energy}`);
-  
-  // ✅ RENVOYER LA NOUVELLE ENERGY AU CLIENT
-  io.to(player.socketId).emit('stats_update', {
-    correctMoves: player.correctMoves,
-    errors: player.errors,
-    combo: player.combo,
-    energy: player.energy,
-    progress: player.progress
+      if (!isActuallyComplete) {
+        console.log(`⚠️ ${player.playerName} progress 81/81 mais grille incorrecte`);
+        return;
+      }
+
+      if (room.isTimeAttack) {
+        console.log(`🎯 ${player.playerName} GRILLE TERMINÉE (Time Attack)`);
+        
+        player.completedEarly = true;
+        player.hasFinished = true;
+        player.finalScore = player.currentScore + 500; // ✅ Bonus completion
+        
+        io.to(player.socketId).emit('grid_completed', {
+          completionBonus: 500,
+          waitingForTimer: true
+        });
+        
+        const opponentId = Object.keys(room.players).find(id => id !== playerId);
+        const opponent = room.players[opponentId];
+        
+        if (opponent && opponent.hasFinished) {
+          endTimeAttackGame(roomId);
+        }
+        
+        return;
+      }
+      
+      // ✅ MODE CLASSIQUE - VICTOIRE IMMÉDIATE
+      room.status = 'finished';
+      
+      const opponentId = Object.keys(room.players).find(id => id !== playerId);
+      const opponent = room.players[opponentId];
+      
+      const winnerScore = player.currentScore;
+      const loserScore = opponent.currentScore || 0;
+      
+      console.log(`🏆 ${player.playerName} GAGNE! ${winnerScore}pts vs ${loserScore}pts`);
+      
+      const result = {
+        winnerId: playerId,
+        winnerName: player.playerName,
+        winnerScore,
+        loserId: opponentId,
+        loserName: opponent.playerName,
+        loserScore,
+        reason: 'completed'
+      };
+      
+      const winnerConnected = io.sockets.sockets.has(player.socketId);
+      const loserConnected = io.sockets.sockets.has(opponent.socketId);
+      
+      if (winnerConnected) {
+        io.to(player.socketId).emit('game_over', result);
+      } else {
+        finishedGames[playerId] = { result, timestamp: Date.now() };
+      }
+      
+      if (loserConnected) {
+        io.to(opponent.socketId).emit('game_over', result);
+      } else {
+        finishedGames[opponentId] = { result, timestamp: Date.now() };
+      }
+      
+      Object.values(room.players).forEach(p => {
+        if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
+        if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
+      });
+      
+      // ✅ CLEANUP DRAIN INTERVAL
+      if (room.drainInterval) {
+        clearInterval(room.drainInterval);
+      }
+      
+      setTimeout(() => delete rooms[roomId], 5000);
+    }
   });
   
-  resetPlayerInactivityTimer(roomId, playerId);
+  // ========== HANDLER trigger_power ==========
   
-  const isTimeAttack = room.gameMode.startsWith('timeAttack');
-
-  let powers = [
-    { type: 'fog', duration: 10000 },
-    { type: 'stun', duration: 5000 },
-    { type: 'flash', duration: 3000 },
-    { type: 'shake', duration: 15000 },
-    { type: 'cell_eraser', duration: 1000 }
-  ];
-
-  if (isTimeAttack) {
-    powers.push({ type: 'time_drain', duration: 1500 });
-  }
-  
-  const randomPower = powers[Math.floor(Math.random() * powers.length)];
-  const opponentSocketId = getOpponentSocketId(roomId, playerId);
-  
-  // ✅✅✅ LOGS CRITIQUES AVANT ENVOI
-  console.log(`🎲 Power-up choisi: ${randomPower.type} (durée: ${randomPower.duration}ms)`);
-
-  // ⏱️ TIME DRAIN
-  if (randomPower.type === 'time_drain' && room.isTimeAttack) {
-    console.log(`⏱️ TIME DRAIN activé`);
+  socket.on('trigger_power', (data) => {
+    const { roomId, playerId } = data;
     
-    const stolenMs = 15000;
+    const room = rooms[roomId];
     
-    const opponentId = Object.keys(room.players).find(id => id !== playerId);
-    const opponent = room.players[opponentId];
-    
-    if (!opponent) return;
-    
-    const now = Date.now();
-    
-    if (opponent.timeAttackTimer) {
-      clearTimeout(opponent.timeAttackTimer);
-    }
-    
-    if (player.timeAttackTimer) {
-      clearTimeout(player.timeAttackTimer);
-    }
-    
-    if (opponent.personalEndTime) {
-      opponent.personalEndTime = Math.max(now, opponent.personalEndTime - stolenMs);
-    }
-    
-    if (player.personalEndTime) {
-      player.personalEndTime = player.personalEndTime + stolenMs;
-    }
-    
-    const opponentTimeRemaining = Math.max(0, opponent.personalEndTime - now);
-    const playerTimeRemaining = Math.max(0, player.personalEndTime - now);
-    
-    if (opponentTimeRemaining > 0) {
-      opponent.timeAttackTimer = setTimeout(() => {
-        handlePlayerTimeExpired(roomId, opponentId);
-      }, opponentTimeRemaining);
-    } else {
-      handlePlayerTimeExpired(roomId, opponentId);
-    }
-    
-    if (playerTimeRemaining > 0) {
-      player.timeAttackTimer = setTimeout(() => {
-        handlePlayerTimeExpired(roomId, playerId);
-      }, playerTimeRemaining);
-    }
-    
-    console.log(`✅ Événement time_drain envoyé`);
-    
-    if (opponentSocketId) {
-      io.to(opponentSocketId).emit('powerup_triggered', {
-        type: 'time_drain',
-        duration: randomPower.duration
-      });
-      
-      io.to(opponentSocketId).emit('time_drained', {
-        drainingPlayerId: playerId,
-        newEndTime: opponent.personalEndTime,
-        timeReduced: stolenMs,
-        timeBoosted: 0
-      });
-    }
-
-    io.to(player.socketId).emit('time_drained', {
-      drainingPlayerId: playerId,
-      newEndTime: player.personalEndTime,
-      timeReduced: 0,
-      timeBoosted: stolenMs
-    });
-    
-    return;
-  }
-
-  // 🗑️ CELL ERASER
-  if (randomPower.type === 'cell_eraser') {
-    console.log(`🗑️ CELL ERASER activé`);
-    
-    const opponentId = Object.keys(room.players).find(id => id !== playerId);
-    const opponent = room.players[opponentId];
-    
-    if (!opponent) return;
-    
-    const validatedCells = [];
-    for (let r = 0; r < 9; r++) {
-      for (let c = 0; c < 9; c++) {
-        const isInitialCell = room.initialPuzzle[r][c] !== 0;
-        const isFilledByPlayer = opponent.grid[r][c] !== 0 && !isInitialCell;
-        
-        if (isFilledByPlayer) {
-          validatedCells.push({ row: r, col: c });
-        }
-      }
-    }
-    
-    if (validatedCells.length === 0) {
-      console.log(`⚠️ Aucune cellule jouée à effacer`);
+    if (!room || (room.gameMode !== 'powerup' && room.gameMode !== 'timeAttackPowerup')) {
+      console.log(`⚠️ Power-up impossible - Mode: ${room?.gameMode || 'unknown'}`);
       return;
     }
     
-    const toErase = Math.min(2, validatedCells.length);
-    const erasedCells = [];
-    
-    for (let i = 0; i < toErase; i++) {
-      const randomIndex = Math.floor(Math.random() * validatedCells.length);
-      const cell = validatedCells.splice(randomIndex, 1)[0];
-      
-      opponent.grid[cell.row][cell.col] = 0;
-      erasedCells.push(cell);
+    const player = room.players[playerId];
+    if (!player || player.energy < 1) {
+      console.log(`⚠️ Énergie insuffisante - ${player?.playerName || 'unknown'}: ${player?.energy || 0}`);
+      return;
     }
     
-    opponent.progress = calculateProgress(opponent.grid);
-    opponent.correctMoves = Math.max(0, opponent.correctMoves - toErase);
+    // ✅✅✅ DÉCRÉMENTER ENERGY CÔTÉ SERVEUR
+    player.energy--;
+    console.log(`⚡ ${player.playerName} utilise power-up → Energy restante: ${player.energy}`);
     
-    if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
-      opponent.combo = 0;
-      opponent.energy = 0;
+    // ✅ RENVOYER LA NOUVELLE ENERGY AU CLIENT
+    io.to(player.socketId).emit('stats_update', {
+      correctMoves: player.correctMoves,
+      errors: player.errors,
+      combo: player.combo,
+      energy: player.energy,
+      progress: player.progress,
+      currentScore: player.currentScore
+    });
+    
+    resetPlayerInactivityTimer(roomId, playerId);
+    
+    const isTimeAttack = room.gameMode.startsWith('timeAttack');
+
+    let powers = [
+      { type: 'fog', duration: 10000 },
+      { type: 'stun', duration: 5000 },
+      { type: 'flash', duration: 3000 },
+      { type: 'shake', duration: 15000 },
+      { type: 'cell_eraser', duration: 1000 }
+    ];
+
+    if (isTimeAttack) {
+      powers.push({ type: 'time_drain', duration: 1500 });
     }
     
-    console.log(`🗑️ ${player.playerName} EFFACE ${toErase} cellule(s) → ${opponent.playerName} Progress=${opponent.progress}/81`);
-    console.log(`✅ Événement cells_erased envoyé`);
+    const randomPower = powers[Math.floor(Math.random() * powers.length)];
+    const opponentSocketId = getOpponentSocketId(roomId, playerId);
     
-    if (opponentSocketId) {
-      io.to(opponentSocketId).emit('powerup_triggered', {
-        type: 'cell_eraser',
-        duration: randomPower.duration
+    console.log(`🎲 Power-up choisi: ${randomPower.type} (durée: ${randomPower.duration}ms)`);
+
+    // ⏱️ TIME DRAIN
+    if (randomPower.type === 'time_drain' && room.isTimeAttack) {
+      console.log(`⏱️ TIME DRAIN activé`);
+      
+      const stolenMs = 15000;
+      
+      const opponentId = Object.keys(room.players).find(id => id !== playerId);
+      const opponent = room.players[opponentId];
+      
+      if (!opponent) return;
+      
+      const now = Date.now();
+      
+      if (opponent.timeAttackTimer) {
+        clearTimeout(opponent.timeAttackTimer);
+      }
+      
+      if (player.timeAttackTimer) {
+        clearTimeout(player.timeAttackTimer);
+      }
+      
+      if (opponent.personalEndTime) {
+        opponent.personalEndTime = Math.max(now, opponent.personalEndTime - stolenMs);
+      }
+      
+      if (player.personalEndTime) {
+        player.personalEndTime = player.personalEndTime + stolenMs;
+      }
+      
+      const opponentTimeRemaining = Math.max(0, opponent.personalEndTime - now);
+      const playerTimeRemaining = Math.max(0, player.personalEndTime - now);
+      
+      if (opponentTimeRemaining > 0) {
+        opponent.timeAttackTimer = setTimeout(() => {
+          handlePlayerTimeExpired(roomId, opponentId);
+        }, opponentTimeRemaining);
+      } else {
+        handlePlayerTimeExpired(roomId, opponentId);
+      }
+      
+      if (playerTimeRemaining > 0) {
+        player.timeAttackTimer = setTimeout(() => {
+          handlePlayerTimeExpired(roomId, playerId);
+        }, playerTimeRemaining);
+      }
+      
+      console.log(`✅ Événement time_drain envoyé`);
+      
+      if (opponentSocketId) {
+        io.to(opponentSocketId).emit('powerup_triggered', {
+          type: 'time_drain',
+          duration: randomPower.duration
+        });
+        
+        io.to(opponentSocketId).emit('time_drained', {
+          drainingPlayerId: playerId,
+          newEndTime: opponent.personalEndTime,
+          timeReduced: stolenMs,
+          timeBoosted: 0
+        });
+      }
+
+      io.to(player.socketId).emit('time_drained', {
+        drainingPlayerId: playerId,
+        newEndTime: player.personalEndTime,
+        timeReduced: 0,
+        timeBoosted: stolenMs
       });
       
-      io.to(opponentSocketId).emit('cells_erased', {
-        erasedCells: erasedCells,
-        newGrid: opponent.grid,
-        newProgress: opponent.progress
-      });
+      return;
+    }
+
+    // 🗑️ CELL ERASER
+    if (randomPower.type === 'cell_eraser') {
+      console.log(`🗑️ CELL ERASER activé`);
       
-      io.to(opponentSocketId).emit('stats_update', {
+      const opponentId = Object.keys(room.players).find(id => id !== playerId);
+      const opponent = room.players[opponentId];
+      
+      if (!opponent) return;
+      
+      const validatedCells = [];
+      for (let r = 0; r < 9; r++) {
+        for (let c = 0; c < 9; c++) {
+          const isInitialCell = room.initialPuzzle[r][c] !== 0;
+          const isFilledByPlayer = opponent.grid[r][c] !== 0 && !isInitialCell;
+          
+          if (isFilledByPlayer) {
+            validatedCells.push({ row: r, col: c });
+          }
+        }
+      }
+      
+      if (validatedCells.length === 0) {
+        console.log(`⚠️ Aucune cellule jouée à effacer`);
+        return;
+      }
+      
+      const toErase = Math.min(2, validatedCells.length);
+      const erasedCells = [];
+      
+      for (let i = 0; i < toErase; i++) {
+        const randomIndex = Math.floor(Math.random() * validatedCells.length);
+        const cell = validatedCells.splice(randomIndex, 1)[0];
+        
+        opponent.grid[cell.row][cell.col] = 0;
+        erasedCells.push(cell);
+      }
+      
+      opponent.progress = calculateProgress(opponent.grid);
+      opponent.correctMoves = Math.max(0, opponent.correctMoves - toErase);
+      
+      if (room.gameMode === 'powerup' || room.gameMode === 'timeAttackPowerup') {
+        opponent.combo = 0;
+        opponent.energy = 0;
+      }
+      
+      console.log(`🗑️ ${player.playerName} EFFACE ${toErase} cellule(s) → ${opponent.playerName} Progress=${opponent.progress}/81`);
+      console.log(`✅ Événement cells_erased envoyé`);
+      
+      if (opponentSocketId) {
+        io.to(opponentSocketId).emit('powerup_triggered', {
+          type: 'cell_eraser',
+          duration: randomPower.duration
+        });
+        
+        io.to(opponentSocketId).emit('cells_erased', {
+          erasedCells: erasedCells,
+          newGrid: opponent.grid,
+          newProgress: opponent.progress
+        });
+        
+        io.to(opponentSocketId).emit('stats_update', {
+          correctMoves: opponent.correctMoves,
+          errors: opponent.errors,
+          combo: opponent.combo,
+          energy: opponent.energy,
+          progress: opponent.progress,
+          currentScore: opponent.currentScore
+        });
+      }
+      
+      io.to(player.socketId).emit('opponentProgress', {
+        progress: opponent.progress,
         correctMoves: opponent.correctMoves,
         errors: opponent.errors,
         combo: opponent.combo,
-        energy: opponent.energy,
-        progress: opponent.progress
-      });
-    }
-    
-    io.to(player.socketId).emit('opponentProgress', {
-      progress: opponent.progress,
-      correctMoves: opponent.correctMoves,
-      errors: opponent.errors,
-      combo: opponent.combo,
-      energy: opponent.energy
-    });
-    
-    return;
-  }
-
-  // ✅✅✅ POWER-UPS NORMAUX (fog/stun/flash/shake) - PROTECTION SPAM
-  const targetSelf = Math.random() < 0.20;
-
-  console.log(`🎯 CIBLE: ${targetSelf ? 'KARMA (20% - soi-même)' : 'ADVERSAIRE (80%)'}`);
-
-  if (targetSelf) {
-    const playerSocket = io.sockets.sockets.get(player.socketId);
-    if (!playerSocket || !playerSocket.connected) {
-      console.log(`❌ Socket lanceur déconnecté - REMBOURSEMENT`);
-      
-      player.energy++;
-      io.to(player.socketId).emit('stats_update', {
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        energy: player.energy,
-        progress: player.progress
+        energy: opponent.energy
       });
       
       return;
     }
-    
-    if (player.activePowerUp) {
-      console.log(`⚠️ ${player.playerName} a déjà un effet actif: ${player.activePowerUp.type} - REMBOURSEMENT`);
-      
-      player.energy++;
-      io.to(player.socketId).emit('stats_update', {
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        energy: player.energy,
-        progress: player.progress
-      });
-      
-      io.to(player.socketId).emit('powerup_blocked', {
-        reason: 'self_already_active',
-        message: 'Vous avez déjà un effet actif !',
-        refundedEnergy: player.energy
-      });
-      
-      return;
-    }
-    
-    player.activePowerUp = {
-      type: randomPower.type,
-      expiresAt: Date.now() + randomPower.duration
-    };
-    
-    console.log(`📤 ENVOI powerup_triggered au LANCEUR (karma)`);
-    console.log(`   Type: ${randomPower.type}`);
-    console.log(`   Duration: ${randomPower.duration}ms`);
-    console.log(`   SocketId: ${player.socketId}`);
-    
-    socket.emit('powerup_triggered', {
-      type: randomPower.type,
-      duration: randomPower.duration
-    });
-    
-    console.log(`✅ Événement powerup_triggered ENVOYÉ au lanceur (karma)`);
-    
-    setTimeout(() => {
-      if (player.activePowerUp?.type === randomPower.type) {
-        player.activePowerUp = null;
-        console.log(`🔓 Effet ${randomPower.type} terminé pour ${player.playerName}`);
+
+    // ✅✅✅ POWER-UPS NORMAUX (fog/stun/flash/shake)
+    const targetSelf = Math.random() < 0.20;
+
+    console.log(`🎯 CIBLE: ${targetSelf ? 'KARMA (20% - soi-même)' : 'ADVERSAIRE (80%)'}`);
+
+    if (targetSelf) {
+      const playerSocket = io.sockets.sockets.get(player.socketId);
+      if (!playerSocket || !playerSocket.connected) {
+        console.log(`❌ Socket lanceur déconnecté - REMBOURSEMENT`);
+        
+        player.energy++;
+        io.to(player.socketId).emit('stats_update', {
+          correctMoves: player.correctMoves,
+          errors: player.errors,
+          combo: player.combo,
+          energy: player.energy,
+          progress: player.progress,
+          currentScore: player.currentScore
+        });
+        
+        return;
       }
-    }, randomPower.duration);
-    
-  } else {
-    if (!opponentSocketId) {
-      console.log(`❌ OpponentSocketId NULL - REMBOURSEMENT`);
       
-      player.energy++;
-      io.to(player.socketId).emit('stats_update', {
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        energy: player.energy,
-        progress: player.progress
-      });
-      
-      return;
-    }
-    
-    const opponentSocket = io.sockets.sockets.get(opponentSocketId);
-    if (!opponentSocket || !opponentSocket.connected) {
-      console.log(`❌ Socket adversaire déconnecté - REMBOURSEMENT`);
-      
-      player.energy++;
-      io.to(player.socketId).emit('stats_update', {
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        energy: player.energy,
-        progress: player.progress
-      });
-      
-      return;
-    }
-    
-    const opponentId = Object.keys(room.players).find(id => id !== playerId);
-    const opponent = room.players[opponentId];
-    
-    if (opponent.activePowerUp) {
-      console.log(`⚠️ ${opponent.playerName} a déjà un effet actif: ${opponent.activePowerUp.type} - REMBOURSEMENT`);
-      
-      player.energy++;
-      io.to(player.socketId).emit('stats_update', {
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        energy: player.energy,
-        progress: player.progress
-      });
-      
-      io.to(player.socketId).emit('powerup_blocked', {
-        reason: 'opponent_already_active',
-        message: 'L\'adversaire a déjà un effet actif !',
-        refundedEnergy: player.energy
-      });
-      
-      return;
-    }
-    
-    opponent.activePowerUp = {
-      type: randomPower.type,
-      expiresAt: Date.now() + randomPower.duration
-    };
-    
-    console.log(`📤 ENVOI powerup_triggered à l'ADVERSAIRE`);
-    console.log(`   Type: ${randomPower.type}`);
-    console.log(`   Duration: ${randomPower.duration}ms`);
-    console.log(`   SocketId: ${opponentSocketId}`);
-    
-    io.to(opponentSocketId).emit('powerup_triggered', {
-      type: randomPower.type,
-      duration: randomPower.duration
-    });
-    
-    console.log(`✅ Événement powerup_triggered ENVOYÉ à l'adversaire`);
-    
-    setTimeout(() => {
-      if (opponent.activePowerUp?.type === randomPower.type) {
-        opponent.activePowerUp = null;
-        console.log(`🔓 Effet ${randomPower.type} terminé pour ${opponent.playerName}`);
+      if (player.activePowerUp) {
+        console.log(`⚠️ ${player.playerName} a déjà un effet actif: ${player.activePowerUp.type} - REMBOURSEMENT`);
+        
+        player.energy++;
+        io.to(player.socketId).emit('stats_update', {
+          correctMoves: player.correctMoves,
+          errors: player.errors,
+          combo: player.combo,
+          energy: player.energy,
+          progress: player.progress,
+          currentScore: player.currentScore
+        });
+        
+        io.to(player.socketId).emit('powerup_blocked', {
+          reason: 'self_already_active',
+          message: 'Vous avez déjà un effet actif !',
+          refundedEnergy: player.energy
+        });
+        
+        return;
       }
-    }, randomPower.duration);
-  }
-});
+      
+      player.activePowerUp = {
+        type: randomPower.type,
+        expiresAt: Date.now() + randomPower.duration
+      };
+      
+      console.log(`📤 ENVOI powerup_triggered au LANCEUR (karma)`);
+      
+      socket.emit('powerup_triggered', {
+        type: randomPower.type,
+        duration: randomPower.duration
+      });
+      
+      setTimeout(() => {
+        if (player.activePowerUp?.type === randomPower.type) {
+          player.activePowerUp = null;
+          console.log(`🔓 Effet ${randomPower.type} terminé pour ${player.playerName}`);
+        }
+      }, randomPower.duration);
+      
+    } else {
+      if (!opponentSocketId) {
+        console.log(`❌ OpponentSocketId NULL - REMBOURSEMENT`);
+        
+        player.energy++;
+        io.to(player.socketId).emit('stats_update', {
+          correctMoves: player.correctMoves,
+          errors: player.errors,
+          combo: player.combo,
+          energy: player.energy,
+          progress: player.progress,
+          currentScore: player.currentScore
+        });
+        
+        return;
+      }
+      
+      const opponentSocket = io.sockets.sockets.get(opponentSocketId);
+      if (!opponentSocket || !opponentSocket.connected) {
+        console.log(`❌ Socket adversaire déconnecté - REMBOURSEMENT`);
+        
+        player.energy++;
+        io.to(player.socketId).emit('stats_update', {
+          correctMoves: player.correctMoves,
+          errors: player.errors,
+          combo: player.combo,
+          energy: player.energy,
+          progress: player.progress,
+          currentScore: player.currentScore
+        });
+        
+        return;
+      }
+      
+      const opponentId = Object.keys(room.players).find(id => id !== playerId);
+      const opponent = room.players[opponentId];
+      
+      if (opponent.activePowerUp) {
+        console.log(`⚠️ ${opponent.playerName} a déjà un effet actif: ${opponent.activePowerUp.type} - REMBOURSEMENT`);
+        
+        player.energy++;
+        io.to(player.socketId).emit('stats_update', {
+          correctMoves: player.correctMoves,
+          errors: player.errors,
+          combo: player.combo,
+          energy: player.energy,
+          progress: player.progress,
+          currentScore: player.currentScore
+        });
+        
+        io.to(player.socketId).emit('powerup_blocked', {
+          reason: 'opponent_already_active',
+          message: 'L\'adversaire a déjà un effet actif !',
+          refundedEnergy: player.energy
+        });
+        
+        return;
+      }
+      
+      opponent.activePowerUp = {
+        type: randomPower.type,
+        expiresAt: Date.now() + randomPower.duration
+      };
+      
+      console.log(`📤 ENVOI powerup_triggered à l'ADVERSAIRE`);
+      
+      io.to(opponentSocketId).emit('powerup_triggered', {
+        type: randomPower.type,
+        duration: randomPower.duration
+      });
+      
+      setTimeout(() => {
+        if (opponent.activePowerUp?.type === randomPower.type) {
+          opponent.activePowerUp = null;
+          console.log(`🔓 Effet ${randomPower.type} terminé pour ${opponent.playerName}`);
+        }
+      }, randomPower.duration);
+    }
+  });
 
   socket.on('heartbeat', (data) => {
     const { roomId, playerId } = data;
@@ -1315,6 +1388,11 @@ socket.on('trigger_power', (data) => {
       if (p.inactivityTimer) clearTimeout(p.inactivityTimer);
       if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
     });
+    
+    // ✅ CLEANUP DRAIN INTERVAL
+    if (room.drainInterval) {
+      clearInterval(room.drainInterval);
+    }
     
     if (disconnectedPlayers[playerId]) {
       clearTimeout(disconnectedPlayers[playerId].timeout);
@@ -1383,6 +1461,11 @@ socket.on('trigger_power', (data) => {
               if (p.timeAttackTimer) clearTimeout(p.timeAttackTimer);
             });
             
+            // ✅ CLEANUP DRAIN INTERVAL
+            if (room.drainInterval) {
+              clearInterval(room.drainInterval);
+            }
+            
             delete rooms[roomId];
             delete disconnectedPlayers[disconnected.playerId];
           }, RECONNECT_TIMEOUT)
@@ -1416,7 +1499,7 @@ socket.on('trigger_power', (data) => {
 app.get('/', (req, res) => {
   res.json({
     status: 'alive',
-    message: 'Sudoku Server v15 - SÉCURITÉ RENFORCÉE',
+    message: 'Sudoku Server v16 - POOL SYSTEM CORRIGÉ',
     uptime: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
     serverReady: isServerReady
@@ -1433,119 +1516,120 @@ app.get('/health', (req, res) => {
     }
   }
   
-  res.json({
-    status: 'ok',
-    uptime: Math.round(process.uptime()),
-    rooms: Object.keys(rooms).length,
-    queues: {
-      classic: {
-        easy: queues.classic.easy.length,
-        medium: queues.classic.medium.length,
-        hard: queues.classic.hard.length,
-        expert: queues.classic.expert.length
+ res.json({
+      status: 'ok',
+      uptime: Math.round(process.uptime()),
+      rooms: Object.keys(rooms).length,
+      queues: {
+        classic: {
+          easy: queues.classic.easy.length,
+          medium: queues.classic.medium.length,
+          hard: queues.classic.hard.length,
+          expert: queues.classic.expert.length
+        },
+        powerup: {
+          easy: queues.powerup.easy.length,
+          medium: queues.powerup.medium.length,
+          hard: queues.powerup.hard.length,
+          expert: queues.powerup.expert.length
+        },
+        timeAttackClassic: {
+          easy: queues.timeAttackClassic.easy.length,
+          medium: queues.timeAttackClassic.medium.length,
+          hard: queues.timeAttackClassic.hard.length,
+          expert: queues.timeAttackClassic.expert.length
+        },
+        timeAttackPowerup: {
+          easy: queues.timeAttackPowerup.easy.length,
+          medium: queues.timeAttackPowerup.medium.length,
+          hard: queues.timeAttackPowerup.hard.length,
+          expert: queues.timeAttackPowerup.expert.length
+        },
+        total: totalWaiting
       },
-      powerup: {
-        easy: queues.powerup.easy.length,
-        medium: queues.powerup.medium.length,
-        hard: queues.powerup.hard.length,
-        expert: queues.powerup.expert.length
+      connectedPlayers: Object.keys(connectedSockets).length,
+      disconnectedPlayers: Object.keys(disconnectedPlayers).length,
+      finishedGames: Object.keys(finishedGames).length,
+      memory: {
+        heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+        heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB'
       },
-      timeAttackClassic: {
-        easy: queues.timeAttackClassic.easy.length,
-        medium: queues.timeAttackClassic.medium.length,
-        hard: queues.timeAttackClassic.hard.length,
-        expert: queues.timeAttackClassic.expert.length
-      },
-      timeAttackPowerup: {
-        easy: queues.timeAttackPowerup.easy.length,
-        medium: queues.timeAttackPowerup.medium.length,
-        hard: queues.timeAttackPowerup.hard.length,
-        expert: queues.timeAttackPowerup.expert.length
-      },
-      total: totalWaiting
-    },
-    connectedPlayers: Object.keys(connectedSockets).length,
-    disconnectedPlayers: Object.keys(disconnectedPlayers).length,
-    finishedGames: Object.keys(finishedGames).length,
-    memory: {
-      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
-      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB'
-    },
-    serverReady: isServerReady
+      serverReady: isServerReady
+    });
   });
-});
 
-app.get('/stats', (req, res) => {
-  res.json({
-    rooms: Object.keys(rooms).map(id => ({
-      roomId: id,
-      gameMode: rooms[id].gameMode,
-      difficulty: rooms[id].difficulty,
-      status: rooms[id].status,
-      players: Object.keys(rooms[id].players).map(pid => ({
-        name: rooms[id].players[pid].playerName,
-        progress: rooms[id].players[pid].progress,
-        combo: rooms[id].players[pid].combo,
-        energy: rooms[id].players[pid].energy
-      }))
-    })),
-    queues: {
-      classic: {
-        easy: queues.classic.easy.map(p => ({ name: p.playerName })),
-        medium: queues.classic.medium.map(p => ({ name: p.playerName })),
-        hard: queues.classic.hard.map(p => ({ name: p.playerName })),
-        expert: queues.classic.expert.map(p => ({ name: p.playerName }))
+  app.get('/stats', (req, res) => {
+    res.json({
+      rooms: Object.keys(rooms).map(id => ({
+        roomId: id,
+        gameMode: rooms[id].gameMode,
+        difficulty: rooms[id].difficulty,
+        status: rooms[id].status,
+        players: Object.keys(rooms[id].players).map(pid => ({
+          name: rooms[id].players[pid].playerName,
+          progress: rooms[id].players[pid].progress,
+          combo: rooms[id].players[pid].combo,
+          energy: rooms[id].players[pid].energy,
+          currentScore: rooms[id].players[pid].currentScore
+        }))
+      })),
+      queues: {
+        classic: {
+          easy: queues.classic.easy.map(p => ({ name: p.playerName })),
+          medium: queues.classic.medium.map(p => ({ name: p.playerName })),
+          hard: queues.classic.hard.map(p => ({ name: p.playerName })),
+          expert: queues.classic.expert.map(p => ({ name: p.playerName }))
+        },
+        powerup: {
+          easy: queues.powerup.easy.map(p => ({ name: p.playerName })),
+          medium: queues.powerup.medium.map(p => ({ name: p.playerName })),
+          hard: queues.powerup.hard.map(p => ({ name: p.playerName })),
+          expert: queues.powerup.expert.map(p => ({ name: p.playerName }))
+        },
+        timeAttackClassic: {
+          easy: queues.timeAttackClassic.easy.map(p => ({ name: p.playerName })),
+          medium: queues.timeAttackClassic.medium.map(p => ({ name: p.playerName })),
+          hard: queues.timeAttackClassic.hard.map(p => ({ name: p.playerName })),
+          expert: queues.timeAttackClassic.expert.map(p => ({ name: p.playerName }))
+        },
+        timeAttackPowerup: {
+          easy: queues.timeAttackPowerup.easy.map(p => ({ name: p.playerName })),
+          medium: queues.timeAttackPowerup.medium.map(p => ({ name: p.playerName })),
+          hard: queues.timeAttackPowerup.hard.map(p => ({ name: p.playerName })),
+          expert: queues.timeAttackPowerup.expert.map(p => ({ name: p.playerName }))
+        }
       },
-      powerup: {
-        easy: queues.powerup.easy.map(p => ({ name: p.playerName })),
-        medium: queues.powerup.medium.map(p => ({ name: p.playerName })),
-        hard: queues.powerup.hard.map(p => ({ name: p.playerName })),
-        expert: queues.powerup.expert.map(p => ({ name: p.playerName }))
-      },
-      timeAttackClassic: {
-        easy: queues.timeAttackClassic.easy.map(p => ({ name: p.playerName })),
-        medium: queues.timeAttackClassic.medium.map(p => ({ name: p.playerName })),
-        hard: queues.timeAttackClassic.hard.map(p => ({ name: p.playerName })),
-        expert: queues.timeAttackClassic.expert.map(p => ({ name: p.playerName }))
-      },
-      timeAttackPowerup: {
-        easy: queues.timeAttackPowerup.easy.map(p => ({ name: p.playerName })),
-        medium: queues.timeAttackPowerup.medium.map(p => ({ name: p.playerName })),
-        hard: queues.timeAttackPowerup.hard.map(p => ({ name: p.playerName })),
-        expert: queues.timeAttackPowerup.expert.map(p => ({ name: p.playerName }))
+      disconnectedPlayers: Object.keys(disconnectedPlayers).length,
+      finishedGames: Object.keys(finishedGames).length
+    });
+  });
+
+  setInterval(() => {
+    let totalWaiting = 0;
+    for (const mode in queues) {
+      for (const difficulty in queues[mode]) {
+        totalWaiting += queues[mode][difficulty].length;
       }
-    },
-    disconnectedPlayers: Object.keys(disconnectedPlayers).length,
-    finishedGames: Object.keys(finishedGames).length
-  });
-});
-
-setInterval(() => {
-  let totalWaiting = 0;
-  for (const mode in queues) {
-    for (const difficulty in queues[mode]) {
-      totalWaiting += queues[mode][difficulty].length;
     }
-  }
-  
-  console.log('📊 ========== STATS ==========');
-  console.log(`   Rooms: ${Object.keys(rooms).length}`);
-  console.log(`   Players Waiting: ${totalWaiting}`);
-  console.log(`   Connected: ${Object.keys(connectedSockets).length}`);
-  console.log(`   Disconnected: ${Object.keys(disconnectedPlayers).length}`);
-  console.log(`   Finished Games Cache: ${Object.keys(finishedGames).length}`);
-  console.log('==============================');
-}, 300000);
+    
+    console.log('📊 ========== STATS ==========');
+    console.log(`   Rooms: ${Object.keys(rooms).length}`);
+    console.log(`   Players Waiting: ${totalWaiting}`);
+    console.log(`   Connected: ${Object.keys(connectedSockets).length}`);
+    console.log(`   Disconnected: ${Object.keys(disconnectedPlayers).length}`);
+    console.log(`   Finished Games Cache: ${Object.keys(finishedGames).length}`);
+    console.log('==============================');
+  }, 300000);
 
-const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 3000;
 
-server.listen(PORT, () => {
-  console.log(`🚀 Serveur v15 - SÉCURITÉ RENFORCÉE sur port ${PORT}`);
-  console.log(`🌐 Health: http://localhost:${PORT}/health`);
-  console.log(`📊 Stats: http://localhost:${PORT}/stats`);
-  
-  setTimeout(() => {
-    isServerReady = true;
-    console.log('✅✅✅ SERVEUR PRÊT - Acceptation des matchs activée');
-  }, 3000);
-});
+  server.listen(PORT, () => {
+    console.log(`🚀 Serveur v16 - POOL SYSTEM CORRIGÉ sur port ${PORT}`);
+    console.log(`🌐 Health: http://localhost:${PORT}/health`);
+    console.log(`📊 Stats: http://localhost:${PORT}/stats`);
+    
+    setTimeout(() => {
+      isServerReady = true;
+      console.log('✅✅✅ SERVEUR PRÊT - Acceptation des matchs activée');
+    }, 3000);
+  });
