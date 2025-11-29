@@ -48,8 +48,8 @@ const INACTIVITY_TIMEOUT = 3 * 60 * 1000;
 const RECONNECT_TIMEOUT = 60000;
 const FINISHED_GAME_TTL = 5 * 60 * 1000;
 const TIME_ATTACK_DURATIONS = {
-  timeAttackClassic: 5 * 60 * 1000,
-  timeAttackPowerup: 3 * 60 * 1000
+  timeAttackClassic: 3 * 60 * 1000,
+  timeAttackPowerup: 5 * 60 * 1000
 };
 
 // Cleanup automatique
