@@ -1067,33 +1067,52 @@ if (randomPower.type === 'cell_eraser') {
 
 // ✅ POWER-UPS NORMAUX (fog/stun/flash/shake)
 // ✅✅✅ POWER-UPS NORMAUX (fog/stun/flash/shake)
-const targetSelf = Math.random() < 0.40;
+// ✅✅✅ POWER-UPS NORMAUX (fog/stun/flash/shake) - RATIO 80/20
+const targetSelf = Math.random() < 0.20;  // ✅ 20% karma au lieu de 40%
 
-console.log(`🎲 TIRAGE: ${targetSelf ? 'SUR SOI' : 'SUR ADVERSAIRE'}`);
+console.log(`🎲 TIRAGE POWER-UP: ${randomPower.type}`);
+console.log(`   Cible: ${targetSelf ? 'LANCEUR (karma)' : 'ADVERSAIRE'}`);
+console.log(`   Probabilité: ${targetSelf ? '20%' : '80%'}`);
 
 if (targetSelf) {
-  console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
+  console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI-MÊME (karma)`);
   console.log(`   SocketId: ${player.socketId}`);
+  
+  // ✅ Vérifier que le socket est connecté
+  const playerSocket = io.sockets.sockets.get(player.socketId);
+  if (!playerSocket || !playerSocket.connected) {
+    console.log(`❌ Socket lanceur déconnecté - Power-up perdu`);
+    return;
+  }
   
   socket.emit('powerup_triggered', {
     type: randomPower.type,
     duration: randomPower.duration
   });
   
-  console.log(`✅ Émis vers ${player.playerName}`);
+  console.log(`✅ Power-up émis vers ${player.playerName} (karma)`);
 } else {
   console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
   console.log(`   Opponent SocketId: ${opponentSocketId}`);
   
-  if (opponentSocketId) {
-    io.to(opponentSocketId).emit('powerup_triggered', {
-      type: randomPower.type,
-      duration: randomPower.duration
-    });
-    console.log(`✅ Émis vers adversaire`);
-  } else {
-    console.log(`❌ ADVERSAIRE DÉCONNECTÉ - Power-up perdu !`);
+  // ✅ Vérifier que l'adversaire existe et est connecté
+  if (!opponentSocketId) {
+    console.log(`❌ OpponentSocketId NULL - Power-up perdu`);
+    return;
   }
+  
+  const opponentSocket = io.sockets.sockets.get(opponentSocketId);
+  if (!opponentSocket || !opponentSocket.connected) {
+    console.log(`❌ Socket adversaire déconnecté - Power-up perdu`);
+    return;
+  }
+  
+  io.to(opponentSocketId).emit('powerup_triggered', {
+    type: randomPower.type,
+    duration: randomPower.duration
+  });
+  
+  console.log(`✅ Power-up émis vers adversaire`);
 }
 });
 
