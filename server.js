@@ -343,6 +343,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
           errors: 0, 
           combo: 0, 
           energy: 0,
+          currentScore: 0,  // ✅ AJOUTÉ
           progress: calculateProgress(puzzle), 
           speed: 0, 
           lastMoveTime: Date.now(),
@@ -363,6 +364,7 @@ function tryMatchmaking(socket, playerId, playerName, gameMode, difficulty) {
           errors: 0, 
           combo: 0, 
           energy: 0,
+          currentScore: 0,  // ✅ AJOUTÉ
           progress: calculateProgress(puzzle), 
           speed: 0, 
           lastMoveTime: Date.now(),
