@@ -1066,21 +1066,33 @@ if (randomPower.type === 'cell_eraser') {
 }
 
 // ✅ POWER-UPS NORMAUX (fog/stun/flash/shake)
+// ✅✅✅ POWER-UPS NORMAUX (fog/stun/flash/shake)
 const targetSelf = Math.random() < 0.40;
+
+console.log(`🎲 TIRAGE: ${targetSelf ? 'SUR SOI' : 'SUR ADVERSAIRE'}`);
 
 if (targetSelf) {
   console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR LUI`);
+  console.log(`   SocketId: ${player.socketId}`);
+  
   socket.emit('powerup_triggered', {
     type: randomPower.type,
     duration: randomPower.duration
   });
+  
+  console.log(`✅ Émis vers ${player.playerName}`);
 } else {
   console.log(`⚡ ${player.playerName} → ${randomPower.type} SUR ADVERSAIRE`);
+  console.log(`   Opponent SocketId: ${opponentSocketId}`);
+  
   if (opponentSocketId) {
     io.to(opponentSocketId).emit('powerup_triggered', {
       type: randomPower.type,
       duration: randomPower.duration
     });
+    console.log(`✅ Émis vers adversaire`);
+  } else {
+    console.log(`❌ ADVERSAIRE DÉCONNECTÉ - Power-up perdu !`);
   }
 }
 });
