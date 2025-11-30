@@ -801,21 +801,24 @@ io.on('connection', (socket) => {
     
     player.progress = calculateProgress(player.grid);
     
-    resetPlayerInactivityTimer(roomId, playerId);
-    
-    // ✅ NOTIFIER ADVERSAIRE
-    const opponentSocketId = getOpponentSocketId(roomId, playerId);
-    if (opponentSocketId) {
-      io.to(opponentSocketId).emit('opponentProgress', {
-        progress: player.progress,
-        correctMoves: player.correctMoves,
-        errors: player.errors,
-        combo: player.combo,
-        energy: player.energy,
-        speed: 0,
-        lastAction: isCorrect ? 'correct' : 'error'
-      });
-    }
+   // ========== DANS cell_played - APRÈS resetPlayerInactivityTimer ==========
+
+resetPlayerInactivityTimer(roomId, playerId);
+
+// ✅ NOTIFIER ADVERSAIRE
+const opponentSocketId = getOpponentSocketId(roomId, playerId);
+if (opponentSocketId) {
+  io.to(opponentSocketId).emit('opponentProgress', {
+    progress: player.progress,
+    correctMoves: player.correctMoves,
+    errors: player.errors,
+    combo: player.combo,
+    energy: player.energy,
+    speed: 0,
+    currentScore: player.currentScore,  // ✅✅✅ AJOUTER ICI
+    lastAction: isCorrect ? 'correct' : 'error'
+  });
+}
     
     // ✅✅✅ ENVOYER STATS COMPLÈTES AU JOUEUR
     io.to(player.socketId).emit('stats_update', {
